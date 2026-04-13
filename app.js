@@ -427,6 +427,7 @@ function renderPage() {
     try { STATE.charts[k].destroy(); } catch {}
     delete STATE.charts[k];
   });
+  txPage = 0;
   pageDiv.innerHTML = '';
 
   // Page header
@@ -539,8 +540,10 @@ function buildIncomeChartCard() {
   const periodLabels = {day:'TODAY',week:'7D',month:'30D',year:'12M',total:'ALL'};
   const card = el('div', {className:'card', style:{padding:'20px 20px 14px'}});
   card.innerHTML = `<div class="section-title mb12">INCOME OVER TIME (${periodLabels[p]||'30D'})</div>`;
-  const canvas = el('canvas', {id:'income-chart', style:{width:'100%',height:'200px'}});
-  card.append(canvas);
+  const chartWrap = el('div', {style:{position:'relative',height:'200px',width:'100%'}});
+  const canvas = el('canvas', {id:'income-chart'});
+  chartWrap.append(canvas);
+  card.append(chartWrap);
 
   setTimeout(() => {
     const cvs = $('income-chart');
@@ -614,6 +617,7 @@ function buildIncomeChartCard() {
       },
       options: {
         responsive:true, maintainAspectRatio:false,
+        animation:{ duration: 300 },
         plugins:{ legend:{ labels:{ color:'#64748b', font:{family:'Space Mono'}, boxWidth:12 } } },
         scales:{
           x:{ ticks:{ color:'#64748b', maxRotation:0, maxTicksLimit:10 }, grid:{ color:'rgba(255,255,255,.04)' } },
@@ -782,7 +786,7 @@ function buildTxList() {
   header.append(html('<div class="section-title">ENTRIES</div>'));
   const tabs = el('div', {className:'flex-gap8'});
   ['all','profit','loss'].forEach(f => {
-    const b = el('button', {className:`ptab ${txFilter===f?'active':''}`, onclick:()=>{ txFilter=f; body.replaceWith(buildTxBody()); }}, f.toUpperCase());
+    const b = el('button', {className:`ptab ${txFilter===f?'active':''}`, onclick:()=>{ txFilter=f; txPage=0; body.replaceWith(buildTxBody()); }}, f.toUpperCase());
     tabs.append(b);
   });
   header.append(tabs);
@@ -793,6 +797,9 @@ function buildTxList() {
   return card;
 }
 
+let txPage = 0;
+const TX_PAGE_SIZE = 50;
+
 function buildTxBody() {
   const wrap   = el('div', {id:'tx-body', style:{maxHeight:'340px',overflowY:'auto'}, className:'sh'});
   const sorted = [...STATE.transactions].sort((a,b)=>b.date.localeCompare(a.date)||(b.created_at||'').localeCompare(a.created_at||''));
@@ -800,7 +807,10 @@ function buildTxBody() {
 
   if (!items.length) { wrap.append(html('<div class="text-center mut f13" style="padding:30px">No entries yet.</div>')); return wrap; }
 
-  items.forEach(t => {
+  const start = txPage * TX_PAGE_SIZE;
+  const page  = items.slice(start, start + TX_PAGE_SIZE);
+
+  page.forEach(t => {
     const row = el('div', {className:'list-row', style:{border:'1px solid var(--bdr)',marginBottom:'6px'}});
     const icon = el('div', {className:`icon-box ${t.amount>=0?'green':'red'}`}, t.amount>=0?'▲':'▼');
     const info = el('div', {style:{flex:'1'}});
@@ -814,6 +824,24 @@ function buildTxBody() {
     row.append(icon, info, amt, del);
     wrap.append(row);
   });
+
+  // Pagination controls
+  if (items.length > TX_PAGE_SIZE) {
+    const nav = el('div', {className:'flex-between', style:{padding:'10px 0 4px',borderTop:'1px solid var(--bdr)',marginTop:'6px'}});
+    const info = el('span', {className:'f11 mut'}, `${start+1}–${Math.min(start+TX_PAGE_SIZE, items.length)} of ${items.length}`);
+    const btns = el('div', {className:'flex-gap8'});
+    if (txPage > 0) {
+      const prev = el('button', {className:'btn btn-gh btn-sm', onclick:()=>{ txPage--; wrap.replaceWith(buildTxBody()); }}, '← PREV');
+      btns.append(prev);
+    }
+    if (start + TX_PAGE_SIZE < items.length) {
+      const next = el('button', {className:'btn btn-gh btn-sm', onclick:()=>{ txPage++; wrap.replaceWith(buildTxBody()); }}, 'NEXT →');
+      btns.append(next);
+    }
+    nav.append(info, btns);
+    wrap.append(nav);
+  }
+
   return wrap;
 }
 
@@ -913,17 +941,19 @@ function _openImportModal() {
       try { await api('POST', '/wallet', {name:w}); STATE.wallet.push({name:w,balance:0}); } catch {}
     }
 
-    for (const row of parsedRows) {
+    const batchSize = 10;
+    for (let i = 0; i < parsedRows.length; i++) {
       try {
-        const tx = await api('POST', '/transactions', row);
+        const tx = await api('POST', '/transactions', parsedRows[i]);
         STATE.transactions.unshift(tx);
         done++;
-        submit.textContent = `Importing ${done}/${parsedRows.length}...`;
+        if (done % batchSize === 0) submit.textContent = `Importing ${done}/${parsedRows.length}...`;
       } catch { errors++; }
     }
 
     overlay.remove();
     toast('Import Done', `${done} entries imported${errors?`, ${errors} failed`:''}`);
+    await loadAll();
     renderPage();
   };
 
@@ -999,8 +1029,10 @@ function renderCharts(container) {
 function buildCategoryChart() {
   const card = el('div', {className:'card', style:{padding:'20px 20px 14px'}});
   card.innerHTML = '<div class="section-title mb12">BY CATEGORY</div>';
-  const canvas = el('canvas', {id:'cat-chart', style:{width:'100%',height:'200px'}});
-  card.append(canvas);
+  const chartWrap2 = el('div', {style:{position:'relative',height:'200px',width:'100%'}});
+  const canvas = el('canvas', {id:'cat-chart'});
+  chartWrap2.append(canvas);
+  card.append(chartWrap2);
 
   setTimeout(() => {
     const ex = STATE.charts['cat-chart']; if(ex) ex.destroy();
