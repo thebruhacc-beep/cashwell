@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>NeonFinance</title>
+  <link rel="stylesheet" href="style.css"/>
+  <!-- Chart library (no build step needed) -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+  <!-- Socket.io (served by our server automatically) -->
+  <script src="/socket.io/socket.io.js"></script>
+</head>
+<body>
+<div id="app"></div>
+<div id="toast">
+  <div class="toast-title" id="toast-title"></div>
+  <div class="toast-body"  id="toast-body"></div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
