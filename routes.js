@@ -182,7 +182,18 @@ router.post('/groups', requireAuth, (req, res) => {
 router.post('/groups/join', requireAuth, (req, res) => {
   const { code } = req.body || {};
   if (!code) return res.status(400).json({ error: 'code required' });
-  if (userGroupId(req.user.id)) return res.status(409).json({ error: 'Already in a group. Leave first.' });
+
+  // Auto-clean stale group memberships (group was deleted or DB was reset)
+  const existingGid = userGroupId(req.user.id);
+  if (existingGid) {
+    const existingGroup = db.prepare('SELECT id FROM groups_table WHERE id=?').get(existingGid);
+    if (!existingGroup) {
+      // Group no longer exists, clean up membership
+      db.prepare('DELETE FROM group_members WHERE user_id=?').run(req.user.id);
+    } else {
+      return res.status(409).json({ error: 'Already in a group. Leave first.' });
+    }
+  }
 
   const g = db.prepare('SELECT * FROM groups_table WHERE UPPER(code)=UPPER(?)').get(code.trim());
   if (!g) return res.status(404).json({ error: 'Invalid invite code' });

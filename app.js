@@ -960,6 +960,8 @@ function _openImportModal() {
     overlay.remove();
     toast('Import Done', `${done} entries imported${errors?`, ${errors} failed`:''}`);
     await loadAll();
+    STATE.page = 'dashboard';
+    currentPeriod = 'total';
     renderPage();
   };
 
