@@ -462,11 +462,13 @@ let currentPeriod = 'day';
 function renderDashboard(container) {
   const col = el('div', {className:'flex-col', style:{gap:'20px'}});
 
-  col.append(buildPeriodStats());
+  try { col.append(buildPeriodStats()); } catch(e) { console.error('PeriodStats error',e); }
   const row = el('div', {className:'g2'});
-  row.append(buildIncomeChartCard(), buildWalletCard());
+  try { row.append(buildIncomeChartCard()); } catch(e) { console.error('IncomeChart error',e); }
+  try { row.append(buildWalletCard()); } catch(e) { console.error('WalletCard error',e); }
   col.append(row);
-  col.append(buildHeatmap(), buildTxList());
+  try { col.append(buildHeatmap()); } catch(e) { console.error('Heatmap error',e); }
+  try { col.append(buildTxList()); } catch(e) { console.error('TxList error',e); }
 
   container.append(col);
 }
@@ -546,85 +548,84 @@ function buildIncomeChartCard() {
   card.append(chartWrap);
 
   setTimeout(() => {
-    const cvs = $('income-chart');
-    if (!cvs) return;
+    try {
+      const cvs = $('income-chart');
+      if (!cvs) return;
 
-    // Build date buckets based on period
-    let buckets = [];
-    const now = new Date();
-    if (p === 'day') {
-      buckets = [...Array(24)].map((_,i) => {
-        const h = String(i).padStart(2,'0');
-        return { key: h, label: `${h}:00` };
-      });
-    } else if (p === 'week') {
-      buckets = [...Array(7)].map((_,i) => {
-        const d = new Date(); d.setDate(d.getDate()-(6-i));
-        return { key: d.toISOString().split('T')[0], label: d.toLocaleDateString('en',{weekday:'short'}) };
-      });
-    } else if (p === 'month') {
-      buckets = [...Array(30)].map((_,i) => {
-        const d = new Date(); d.setDate(d.getDate()-(29-i));
-        return { key: d.toISOString().split('T')[0], label: d.toISOString().slice(5,10) };
-      });
-    } else if (p === 'year') {
-      buckets = [...Array(12)].map((_,i) => {
-        const d = new Date(now.getFullYear(), i, 1);
-        return { key: `${now.getFullYear()}-${String(i+1).padStart(2,'0')}`, label: d.toLocaleDateString('en',{month:'short'}) };
-      });
-    } else {
-      // total: group by year-month
-      const months = new Set(STATE.transactions.map(t=>t.date.slice(0,7))).size;
-      const count  = Math.max(months, 6);
-      buckets = [...Array(count)].map((_,i) => {
-        const d = new Date(now.getFullYear(), now.getMonth()-(count-1-i), 1);
-        const key = d.toISOString().slice(0,7);
-        return { key, label: d.toLocaleDateString('en',{month:'short',year:'2-digit'}) };
-      });
-    }
+      const now = new Date();
+      const txns = STATE.transactions;
+      let labels = [], dailyData = [], cumData = [];
 
-    const map = {};
-    buckets.forEach(b => { map[b.key] = 0; });
-
-    STATE.transactions.forEach(t => {
       if (p === 'day') {
-        if (t.date === new Date().toISOString().split('T')[0]) {
-          // no hour data, spread across all hours evenly — just add to today total shown at 12:00
-          map['12'] = (map['12']||0) + t.amount;
-        }
-      } else if (p === 'year' || p === 'total') {
-        const mk = t.date.slice(0,7);
-        if (map[mk] !== undefined) map[mk] += t.amount;
+        // 24 hours, put all today's transactions at their hour (no hour stored, use noon)
+        const todayKey = now.toISOString().split('T')[0];
+        const todayTotal = txns.filter(t=>t.date===todayKey).reduce((s,t)=>s+t.amount,0);
+        labels = [...Array(24)].map((_,i)=>String(i).padStart(2,'0')+':00');
+        dailyData = Array(24).fill(0);
+        dailyData[12] = +todayTotal.toFixed(2);
+        let c=0; cumData = dailyData.map(v=>{c+=v;return +c.toFixed(2);});
+
+      } else if (p === 'week') {
+        const days = [...Array(7)].map((_,i)=>{ const d=new Date(); d.setDate(d.getDate()-(6-i)); return d.toISOString().split('T')[0]; });
+        const map = {}; days.forEach(d=>{map[d]=0;});
+        txns.forEach(t=>{ if(map[t.date]!==undefined) map[t.date]+=t.amount; });
+        labels = days.map(d=>new Date(d+'T12:00:00').toLocaleDateString('en',{weekday:'short'}));
+        dailyData = days.map(d=>+(map[d]||0).toFixed(2));
+        let c=0; cumData = dailyData.map(v=>{c+=v;return +c.toFixed(2);});
+
+      } else if (p === 'month') {
+        const days = [...Array(30)].map((_,i)=>{ const d=new Date(); d.setDate(d.getDate()-(29-i)); return d.toISOString().split('T')[0]; });
+        const map = {}; days.forEach(d=>{map[d]=0;});
+        txns.forEach(t=>{ if(map[t.date]!==undefined) map[t.date]+=t.amount; });
+        labels = days.map(d=>d.slice(5));
+        dailyData = days.map(d=>+(map[d]||0).toFixed(2));
+        let c=0; cumData = dailyData.map(v=>{c+=v;return +c.toFixed(2);});
+
+      } else if (p === 'year') {
+        const months = [...Array(12)].map((_,i)=>`${now.getFullYear()}-${String(i+1).padStart(2,'0')}`);
+        const map = {}; months.forEach(m=>{map[m]=0;});
+        txns.forEach(t=>{ const mk=t.date.slice(0,7); if(map[mk]!==undefined) map[mk]+=t.amount; });
+        labels = months.map(m=>new Date(m+'-15').toLocaleDateString('en',{month:'short'}));
+        dailyData = months.map(m=>+(map[m]||0).toFixed(2));
+        let c=0; cumData = dailyData.map(v=>{c+=v;return +c.toFixed(2);});
+
       } else {
-        if (map[t.date] !== undefined) map[t.date] += t.amount;
+        // total: use all unique year-months sorted
+        const monthSet = new Set(txns.map(t=>t.date.slice(0,7)));
+        const months = [...monthSet].sort();
+        if (!months.length) { months.push(now.toISOString().slice(0,7)); }
+        const map = {}; months.forEach(m=>{map[m]=0;});
+        txns.forEach(t=>{ const mk=t.date.slice(0,7); if(map[mk]!==undefined) map[mk]+=t.amount; });
+        labels = months.map(m=>{ try{ return new Date(m+'-15').toLocaleDateString('en',{month:'short',year:'2-digit'}); } catch{ return m; } });
+        dailyData = months.map(m=>+(map[m]||0).toFixed(2));
+        let c=0; cumData = dailyData.map(v=>{c+=v;return +c.toFixed(2);});
       }
-    });
 
-    const dailyData = buckets.map(b => +(map[b.key]||0).toFixed(2));
-    let cum = 0;
-    const cumData = dailyData.map(v => { cum += v; return +cum.toFixed(2); });
-    const labels  = buckets.map(b => b.label);
-
-    const ctx = cvs.getContext('2d');
-    STATE.charts['income-chart'] = new Chart(ctx, {
-      type: 'line',
-      data: {
-        labels,
-        datasets: [
-          { label:'Cumulative', data:cumData,   borderColor:'#00ff88', borderWidth:2,   pointRadius:0, tension:.4, fill:false },
-          { label:'Daily',      data:dailyData, borderColor:'#00d4ff', borderWidth:1.5, borderDash:[4,2], pointRadius:0, tension:.4, fill:false },
-        ]
-      },
-      options: {
-        responsive:true, maintainAspectRatio:false,
-        animation:{ duration: 300 },
-        plugins:{ legend:{ labels:{ color:'#64748b', font:{family:'Space Mono'}, boxWidth:12 } } },
-        scales:{
-          x:{ ticks:{ color:'#64748b', maxRotation:0, maxTicksLimit:10 }, grid:{ color:'rgba(255,255,255,.04)' } },
-          y:{ ticks:{ color:'#64748b', callback:v=>`$${v}` }, grid:{ color:'rgba(255,255,255,.04)' } }
+      const ctx = cvs.getContext('2d');
+      STATE.charts['income-chart'] = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [
+            { label:'Cumulative', data:cumData,   borderColor:'#00ff88', borderWidth:2,   pointRadius:0, tension:.4, fill:false },
+            { label:'Daily',      data:dailyData, borderColor:'#00d4ff', borderWidth:1.5, borderDash:[4,2], pointRadius:0, tension:.4, fill:false },
+          ]
+        },
+        options: {
+          responsive:true, maintainAspectRatio:false,
+          animation:{ duration:200 },
+          plugins:{ legend:{ labels:{ color:'#64748b', font:{family:'Space Mono'}, boxWidth:12 } } },
+          scales:{
+            x:{ ticks:{ color:'#64748b', maxRotation:0, maxTicksLimit:12 }, grid:{ color:'rgba(255,255,255,.04)' } },
+            y:{ ticks:{ color:'#64748b', callback:v=>`$${v}` }, grid:{ color:'rgba(255,255,255,.04)' } }
+          }
         }
-      }
-    });
+      });
+    } catch(e) {
+      console.error('Chart render error:', e);
+      const wrap = $('income-chart')?.parentElement;
+      if (wrap) wrap.innerHTML = '<div class="mut f12" style="padding:20px;text-align:center">Chart unavailable</div>';
+    }
   }, 50);
 
   return card;
