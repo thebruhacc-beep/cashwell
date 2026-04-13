@@ -462,11 +462,16 @@ let currentPeriod = 'day';
 function renderDashboard(container) {
   const col = el('div', {className:'flex-col', style:{gap:'20px'}});
 
+  // 1. Period tabs + grote stat kaart + records
   try { col.append(buildPeriodStats()); } catch(e) { console.error('PeriodStats error',e); }
-  const row = el('div', {className:'g2'});
-  try { row.append(buildIncomeChartCard()); } catch(e) { console.error('IncomeChart error',e); }
-  try { row.append(buildWalletCard()); } catch(e) { console.error('WalletCard error',e); }
-  col.append(row);
+
+  // 2. Chart (vol breedte, reageert op currentPeriod)
+  try { col.append(buildIncomeChartCard()); } catch(e) { console.error('IncomeChart error',e); }
+
+  // 3. Wallet kaart (vol breedte)
+  try { col.append(buildWalletCard()); } catch(e) { console.error('WalletCard error',e); }
+
+  // 4. Heatmap + entries lijst
   try { col.append(buildHeatmap()); } catch(e) { console.error('Heatmap error',e); }
   try { col.append(buildTxList()); } catch(e) { console.error('TxList error',e); }
 
