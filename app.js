@@ -47,12 +47,16 @@ function fmtPlain(n) {
   if (a >= 1e3) return `$${(a/1e3).toFixed(1)}K`;
   return `$${a.toFixed(2)}`;
 }
-const todayStr  = () => new Date().toISOString().split('T')[0];
+const todayStr  = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+};
+const localDateStr = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 const cutoffMap = {
   day:   () => todayStr(),
-  week:  () => { const d=new Date(); d.setDate(d.getDate()-7);         return d.toISOString().split('T')[0]; },
-  month: () => { const d=new Date(); d.setDate(1); d.setMonth(d.getMonth()-1); return d.toISOString().split('T')[0]; },
-  year:  () => { const d=new Date(); d.setDate(1); d.setFullYear(d.getFullYear()-1); return d.toISOString().split('T')[0]; },
+  week:  () => { const d=new Date(); d.setDate(d.getDate()-7);         return localDateStr(d); },
+  month: () => { const d=new Date(); d.setDate(1); d.setMonth(d.getMonth()-1); return localDateStr(d); },
+  year:  () => { const d=new Date(); d.setDate(1); d.setFullYear(d.getFullYear()-1); return localDateStr(d); },
   total: () => '0000-00-00',
 };
 
@@ -553,12 +557,15 @@ function buildPeriodStatsInner() {
   const profits = txns.filter(t=>t.amount>0).reduce((s,t)=>s+t.amount,0);
   const losses  = txns.filter(t=>t.amount<0).reduce((s,t)=>s+t.amount,0);
 
-  // Records
+  // Records — best = hoogste dag/week/maand, worst = laagste
   const recs = {};
   PERIODS.forEach(p => {
     const b = bucketsByPeriod(STATE.transactions, p);
-    const v = Object.values(b);
-    recs[p] = { best: v.length?Math.max(...v):0, worst: v.length?Math.min(...v):0 };
+    const v = Object.values(b).filter(x => x !== 0);
+    recs[p] = {
+      best:  v.length ? Math.max(...v) : null,
+      worst: v.length ? Math.min(...v) : null
+    };
   });
   const cr = recs[currentPeriod];
 
@@ -580,9 +587,9 @@ function buildPeriodStatsInner() {
   // Records
   const recsRow = el('div', {className:'g2'});
   const bestCard = el('div', {className:'record-bar best'});
-  bestCard.innerHTML = `<div><div class="record-label">BEST ${PLABEL[currentPeriod]}</div><div class="record-value ny">${cr.best>0?fmt(cr.best):'—'}</div></div><span style="font-size:24px">🏆</span>`;
+  bestCard.innerHTML = `<div><div class="record-label">BEST ${PLABEL[currentPeriod]}</div><div class="record-value ny">${cr.best!==null?fmt(cr.best):'—'}</div></div><span style="font-size:24px">🏆</span>`;
   const worstCard = el('div', {className:'record-bar worst'});
-  worstCard.innerHTML = `<div><div class="record-label">WORST ${PLABEL[currentPeriod]}</div><div class="record-value nr">${cr.worst<0?fmt(cr.worst):'—'}</div></div><span style="font-size:24px">📉</span>`;
+  worstCard.innerHTML = `<div><div class="record-label">WORST ${PLABEL[currentPeriod]}</div><div class="record-value nr">${cr.worst!==null?fmt(cr.worst):'—'}</div></div><span style="font-size:24px">📉</span>`;
   recsRow.append(bestCard, worstCard);
   wrap.append(recsRow);
 
@@ -619,7 +626,7 @@ function buildIncomeChartCard() {
         let c=0; cumData = dailyData.map(v=>{c+=v;return +c.toFixed(2);});
 
       } else if (p === 'week') {
-        const days = [...Array(7)].map((_,i)=>{ const d=new Date(); d.setDate(d.getDate()-(6-i)); return d.toISOString().split('T')[0]; });
+        const days = [...Array(7)].map((_,i)=>{ const d=new Date(); d.setDate(d.getDate()-(6-i)); return localDateStr(d); });
         const map = {}; days.forEach(d=>{map[d]=0;});
         txns.forEach(t=>{ if(map[t.date]!==undefined) map[t.date]+=t.amount; });
         labels = days.map(d=>new Date(d+'T12:00:00').toLocaleDateString('en',{weekday:'short'}));
@@ -627,7 +634,7 @@ function buildIncomeChartCard() {
         let c=0; cumData = dailyData.map(v=>{c+=v;return +c.toFixed(2);});
 
       } else if (p === 'month') {
-        const days = [...Array(30)].map((_,i)=>{ const d=new Date(); d.setDate(d.getDate()-(29-i)); return d.toISOString().split('T')[0]; });
+        const days = [...Array(30)].map((_,i)=>{ const d=new Date(); d.setDate(d.getDate()-(29-i)); return localDateStr(d); });
         const map = {}; days.forEach(d=>{map[d]=0;});
         txns.forEach(t=>{ if(map[t.date]!==undefined) map[t.date]+=t.amount; });
         labels = days.map(d=>d.slice(5));
@@ -801,7 +808,7 @@ function buildHeatmap() {
 
   const days = [...Array(84)].map((_,i)=>{
     const d=new Date(); d.setDate(d.getDate()-(83-i));
-    const key=d.toISOString().split('T')[0];
+    const key=localDateStr(d);
     return {key,val:dayMap[key]||0,label:d.getDate()};
   });
 
