@@ -64,34 +64,40 @@ function parseDate(raw) {
   // Already a JS Date object (SheetJS cellDates:true)
   if (raw instanceof Date) {
     if (isNaN(raw)) return null;
-    return raw.toISOString().split('T')[0];
+    // Use UTC to avoid timezone shifts
+    const y = raw.getUTCFullYear();
+    const m = String(raw.getUTCMonth()+1).padStart(2,'0');
+    const d = String(raw.getUTCDate()).padStart(2,'0');
+    return `${y}-${m}-${d}`;
   }
   const s = String(raw).trim();
   // YYYY-MM-DD
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-  // DD/MM/YYYY or D/M/YYYY
+  // DD/MM/YYYY — altijd DD/MM want Belgian/European format
   if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(s)) {
     const [d,m,y] = s.split('/');
-    const result = `${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`;
-    return isNaN(new Date(result)) ? null : result;
-  }
-  // MM/DD/YYYY (US format)
-  if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(s)) {
-    const [m,d,y] = s.split('/');
-    const result = `${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`;
-    return isNaN(new Date(result)) ? null : result;
+    const day = d.padStart(2,'0'), mon = m.padStart(2,'0');
+    // Validate: month must be 1-12
+    if (parseInt(mon) < 1 || parseInt(mon) > 12) return null;
+    if (parseInt(day) < 1 || parseInt(day) > 31) return null;
+    return `${y}-${mon}-${day}`;
   }
   // DD-MM-YYYY
   if (/^\d{1,2}-\d{1,2}-\d{4}$/.test(s)) {
     const [d,m,y] = s.split('-');
-    const result = `${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`;
-    return isNaN(new Date(result)) ? null : result;
+    const day = d.padStart(2,'0'), mon = m.padStart(2,'0');
+    if (parseInt(mon) < 1 || parseInt(mon) > 12) return null;
+    return `${y}-${mon}-${day}`;
   }
-  // Excel serial number (number as string)
-  if (/^\d{5}$/.test(s)) {
+  // Excel serial number (number as string e.g. "45678")
+  if (/^\d{4,5}$/.test(s)) {
     const serial = parseInt(s);
     const d = new Date(Date.UTC(1899,11,30) + serial*86400000);
-    return isNaN(d) ? null : d.toISOString().split('T')[0];
+    if (isNaN(d)) return null;
+    const y = d.getUTCFullYear();
+    const m = String(d.getUTCMonth()+1).padStart(2,'0');
+    const dd = String(d.getUTCDate()).padStart(2,'0');
+    return `${y}-${m}-${dd}`;
   }
   // Try native parse as last resort
   const d = new Date(s);
