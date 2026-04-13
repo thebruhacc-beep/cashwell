@@ -58,10 +58,52 @@ const cutoffMap = {
 
 function uid() { return Math.random().toString(36).slice(2,10); }
 
+// Robust date parser — always returns YYYY-MM-DD or null
+function parseDate(raw) {
+  if (!raw) return null;
+  // Already a JS Date object (SheetJS cellDates:true)
+  if (raw instanceof Date) {
+    if (isNaN(raw)) return null;
+    return raw.toISOString().split('T')[0];
+  }
+  const s = String(raw).trim();
+  // YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  // DD/MM/YYYY or D/M/YYYY
+  if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(s)) {
+    const [d,m,y] = s.split('/');
+    const result = `${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`;
+    return isNaN(new Date(result)) ? null : result;
+  }
+  // MM/DD/YYYY (US format)
+  if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(s)) {
+    const [m,d,y] = s.split('/');
+    const result = `${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`;
+    return isNaN(new Date(result)) ? null : result;
+  }
+  // DD-MM-YYYY
+  if (/^\d{1,2}-\d{1,2}-\d{4}$/.test(s)) {
+    const [d,m,y] = s.split('-');
+    const result = `${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`;
+    return isNaN(new Date(result)) ? null : result;
+  }
+  // Excel serial number (number as string)
+  if (/^\d{5}$/.test(s)) {
+    const serial = parseInt(s);
+    const d = new Date(Date.UTC(1899,11,30) + serial*86400000);
+    return isNaN(d) ? null : d.toISOString().split('T')[0];
+  }
+  // Try native parse as last resort
+  const d = new Date(s);
+  return isNaN(d) ? null : d.toISOString().split('T')[0];
+}
+
 function filterByPeriod(txns, period) {
-  if (period === 'day')   return txns.filter(t => t.date === todayStr());
-  if (period === 'total') return txns;
-  return txns.filter(t => t.date >= cutoffMap[period]());
+  // First remove any transactions with invalid/missing dates
+  const valid = txns.filter(t => t.date && /^\d{4}-\d{2}-\d{2}$/.test(t.date));
+  if (period === 'day')   return valid.filter(t => t.date === todayStr());
+  if (period === 'total') return valid;
+  return valid.filter(t => t.date >= cutoffMap[period]());
 }
 
 function bucketsByPeriod(txns, period) {
@@ -883,27 +925,18 @@ function _openImportModal() {
     reader.onload = e => {
       const wb   = XLSX.read(e.target.result, {type:'binary', cellDates:true});
       const ws   = wb.Sheets[wb.SheetNames[0]];
-      const rows = XLSX.utils.sheet_to_json(ws, {raw:false});
+      const rows = XLSX.utils.sheet_to_json(ws, {raw:true, cellDates:true});
       parsedRows = rows.map(r => {
-        // Support Datum/Date, Bedrag/Amount, Type/Category columns
         const rawDate   = r['Datum'] || r['Date'] || r['datum'] || r['date'] || '';
         const rawAmount = r['Bedrag'] || r['Amount'] || r['bedrag'] || r['amount'] || '0';
-        const rawType   = r['Type'] || r['Category'] || r['type'] || r['category'] || 'Other';
-        const rawWallet = r['Wallet'] || r['wallet'] || (STATE.wallet[0]?.name || 'Cash');
-        const rawNote   = r['Note'] || r['Notitie'] || r['note'] || '';
+        const rawType   = String(r['Type'] || r['Category'] || r['type'] || r['category'] || 'Other').trim();
+        const rawWallet = String(r['Wallet'] || r['wallet'] || (STATE.wallet[0]?.name || 'Cash')).trim();
+        const rawNote   = String(r['Note'] || r['Notitie'] || r['note'] || '').trim();
 
-        // Parse date: support DD/MM/YYYY and YYYY-MM-DD
-        let date = rawDate;
-        if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(rawDate)) {
-          const [d,m,y] = rawDate.split('/');
-          date = `${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`;
-        } else if (rawDate instanceof Date) {
-          date = rawDate.toISOString().split('T')[0];
-        }
-
+        const date   = parseDate(rawDate);
         const amount = parseFloat(String(rawAmount).replace(',','.')) || 0;
-        return { date, amount, category: rawType, wallet: rawWallet, note: rawNote };
-      }).filter(r => r.date && r.amount !== 0);
+        return { date, amount, category: rawType || 'Other', wallet: rawWallet, note: rawNote };
+      }).filter(r => r.date !== null && r.amount !== 0);
 
       preview.innerHTML = '';
       if (!parsedRows.length) {
