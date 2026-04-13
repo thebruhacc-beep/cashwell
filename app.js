@@ -268,14 +268,27 @@ function renderAuth() {
 }
 
 // ─── TICKER BAR ───────────────────────────────────────────────────────────────
-let cryptoPrices = { BTC: 83420, SOL: 142, USDC: 1 };
+let cryptoPrices = { BTC: 0, SOL: 0, USDC: 1 };
+async function fetchCryptoPrices() {
+  try {
+    const res = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,solana,usd-coin&vs_currencies=usd');
+    const data = await res.json();
+    cryptoPrices.BTC  = data.bitcoin?.usd  || cryptoPrices.BTC;
+    cryptoPrices.SOL  = data.solana?.usd   || cryptoPrices.SOL;
+    cryptoPrices.USDC = data['usd-coin']?.usd || 1;
+    const t = $('ticker-inner');
+    if (t) t.innerHTML = tickerInner();
+    // Also update wallet page if open
+    const cryptoRows = document.querySelectorAll('.crypto-price-val');
+    cryptoRows.forEach(el => {
+      const sym = el.dataset.sym;
+      if (sym && cryptoPrices[sym] !== undefined) el.textContent = '$' + Number(cryptoPrices[sym]).toLocaleString();
+    });
+  } catch(e) { console.warn('Crypto fetch failed:', e); }
+}
 function startTicker() {
-  setInterval(() => {
-    cryptoPrices.BTC  = +(cryptoPrices.BTC  * (1+(Math.random()-.498)*.002)).toFixed(0);
-    cryptoPrices.SOL  = +(cryptoPrices.SOL  * (1+(Math.random()-.498)*.003)).toFixed(2);
-    const el = $('ticker-inner');
-    if (el) el.innerHTML = tickerInner();
-  }, 3000);
+  fetchCryptoPrices();
+  setInterval(fetchCryptoPrices, 60000);
 }
 
 function tickerInner() {
@@ -413,8 +426,11 @@ function renderPage() {
   const header = el('div', {className:'page-header'});
   const title  = NAV_ITEMS.find(n => n.id===STATE.page)?.label || 'Dashboard';
   const left   = html(`<div><div class="page-title">${title}</div><div class="page-date">${new Date().toLocaleDateString('en-US',{weekday:'long',year:'numeric',month:'long',day:'numeric'})}</div></div>`);
-  const addBtn = el('button', {className:'btn btn-g glow-g', onclick: showAddTxModal}, '+ ADD ENTRY');
-  header.append(left, addBtn);
+  const addBtn    = el('button', {className:'btn btn-g glow-g', onclick: showAddTxModal}, '+ ADD ENTRY');
+  const importBtn = el('button', {className:'btn btn-gh', style:{marginRight:'8px'}, onclick: showImportModal}, '⬆ IMPORT');
+  const btnGroup  = el('div', {className:'flex-gap8'});
+  btnGroup.append(importBtn, addBtn);
+  header.append(left, btnGroup);
   pageDiv.append(header);
 
   // Render correct page
@@ -519,7 +535,7 @@ function buildIncomeChartCard() {
 
   setTimeout(() => {
     const existing = STATE.charts['income-chart'];
-    if (existing) existing.destroy();
+    if (existing) { existing.destroy(); delete STATE.charts['income-chart']; }
 
     const map = {};
     const last30 = [...Array(30)].map((_,i)=>{ const d=new Date(); d.setDate(d.getDate()-(29-i)); return d.toISOString().split('T')[0]; });
@@ -531,7 +547,9 @@ function buildIncomeChartCard() {
     const dailyData = last30.map(d => +map[d].toFixed(2));
     const labels = last30.map(d=>d.slice(5));
 
-    const ctx = $('income-chart').getContext('2d');
+    const canvas = $('income-chart');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
     STATE.charts['income-chart'] = new Chart(ctx, {
       type: 'line',
       data: {
@@ -610,24 +628,26 @@ function renderWalletBody(container, editing) {
     chartWrap.append(canvas);
     container.append(chartWrap);
 
+    const pieData = STATE.wallet.filter(w=>w.balance>0);
     setTimeout(() => {
       const ex = STATE.charts['wallet-pie']; if(ex) ex.destroy();
-      const data = STATE.wallet.filter(w=>w.balance>0);
       const ctx  = $('wallet-pie')?.getContext('2d');
       if (!ctx) return;
       STATE.charts['wallet-pie'] = new Chart(ctx, {
         type:'doughnut',
-        data:{ labels:data.map(w=>w.name), datasets:[{ data:data.map(w=>w.balance), backgroundColor:data.map((_,i)=>SLICE_COLORS[i%SLICE_COLORS.length]), borderWidth:0 }] },
+        data:{ labels:pieData.map(w=>w.name), datasets:[{ data:pieData.map(w=>w.balance), backgroundColor:pieData.map((_,i)=>SLICE_COLORS[i%SLICE_COLORS.length]), borderWidth:0 }] },
         options:{ responsive:false, plugins:{ legend:{ display:false } }, cutout:'65%' }
       });
     }, 50);
 
     container.append(html(`<div style="text-align:center;font-family:Orbitron,sans-serif;font-size:22px;color:#00ff88;margin-bottom:12px">$${total.toLocaleString()}</div>`));
-    STATE.wallet.forEach((w,i) => {
+    STATE.wallet.forEach((w) => {
+      const pieIdx = pieData.findIndex(p=>p.name===w.name);
+      const color  = pieIdx>=0 ? SLICE_COLORS[pieIdx%SLICE_COLORS.length] : '#64748b';
       container.append(html(`
         <div class="flex-between" style="padding:8px 0;border-bottom:1px solid var(--bdr)">
-          <div class="flex-gap8"><div style="width:8px;height:8px;border-radius:50%;background:${SLICE_COLORS[i%SLICE_COLORS.length]}"></div><span class="f12">${w.name}</span></div>
-          <span class="f12" style="color:${SLICE_COLORS[i%SLICE_COLORS.length]}">$${w.balance.toLocaleString()}</span>
+          <div class="flex-gap8"><div style="width:8px;height:8px;border-radius:50%;background:${color}"></div><span class="f12">${w.name}</span></div>
+          <span class="f12" style="color:${color}">$${w.balance.toLocaleString()}</span>
         </div>
       `));
     });
@@ -744,6 +764,122 @@ function buildTxBody() {
   return wrap;
 }
 
+
+// ─── IMPORT EXCEL MODAL ───────────────────────────────────────────────────────
+function showImportModal() {
+  // Load SheetJS if not already loaded
+  if (!window.XLSX) {
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
+    s.onload = () => _openImportModal();
+    document.head.append(s);
+  } else {
+    _openImportModal();
+  }
+}
+
+function _openImportModal() {
+  const overlay = el('div', {className:'overlay', onclick:e=>{ if(e.target===overlay) overlay.remove(); }});
+  const modal   = el('div', {className:'modal slide'});
+  modal.innerHTML = `<div class="modal-title nb">IMPORT ENTRIES</div><div class="modal-sub">Upload an Excel or CSV file with columns: Datum, Bedrag, Type</div>`;
+
+  const fileInp = el('input', {type:'file', accept:'.xlsx,.xls,.csv', className:'inp', style:{marginBottom:'12px',padding:'10px'}});
+  const preview = el('div', {id:'import-preview', style:{maxHeight:'200px',overflowY:'auto',marginBottom:'12px'}});
+  modal.append(fileInp, preview);
+
+  let parsedRows = [];
+
+  fileInp.onchange = () => {
+    const file = fileInp.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = e => {
+      const wb   = XLSX.read(e.target.result, {type:'binary', cellDates:true});
+      const ws   = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, {raw:false});
+      parsedRows = rows.map(r => {
+        // Support Datum/Date, Bedrag/Amount, Type/Category columns
+        const rawDate   = r['Datum'] || r['Date'] || r['datum'] || r['date'] || '';
+        const rawAmount = r['Bedrag'] || r['Amount'] || r['bedrag'] || r['amount'] || '0';
+        const rawType   = r['Type'] || r['Category'] || r['type'] || r['category'] || 'Other';
+        const rawWallet = r['Wallet'] || r['wallet'] || (STATE.wallet[0]?.name || 'Cash');
+        const rawNote   = r['Note'] || r['Notitie'] || r['note'] || '';
+
+        // Parse date: support DD/MM/YYYY and YYYY-MM-DD
+        let date = rawDate;
+        if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(rawDate)) {
+          const [d,m,y] = rawDate.split('/');
+          date = `${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`;
+        } else if (rawDate instanceof Date) {
+          date = rawDate.toISOString().split('T')[0];
+        }
+
+        const amount = parseFloat(String(rawAmount).replace(',','.')) || 0;
+        return { date, amount, category: rawType, wallet: rawWallet, note: rawNote };
+      }).filter(r => r.date && r.amount !== 0);
+
+      preview.innerHTML = '';
+      if (!parsedRows.length) {
+        preview.innerHTML = '<div class="f12 mut" style="padding:10px">No valid rows found. Check column names: Datum, Bedrag, Type</div>';
+        return;
+      }
+      const table = el('table', {style:{width:'100%',borderCollapse:'collapse',fontSize:'11px'}});
+      table.innerHTML = '<tr style="color:#64748b"><th style="text-align:left;padding:4px">Datum</th><th style="text-align:left;padding:4px">Bedrag</th><th style="text-align:left;padding:4px">Type</th><th style="text-align:left;padding:4px">Wallet</th></tr>';
+      parsedRows.slice(0,20).forEach(r => {
+        const tr = el('tr', {style:{borderBottom:'1px solid var(--bdr)'}});
+        tr.innerHTML = `<td style="padding:4px">${r.date}</td><td style="padding:4px;color:${r.amount>=0?'#00ff88':'#ff3366'}">${r.amount>=0?'+':''}${r.amount}</td><td style="padding:4px">${r.category}</td><td style="padding:4px">${r.wallet}</td>`;
+        table.append(tr);
+      });
+      if (parsedRows.length > 20) table.innerHTML += `<tr><td colspan="4" style="padding:4px;color:#64748b">...and ${parsedRows.length-20} more rows</td></tr>`;
+      preview.append(table);
+    };
+    reader.readAsBinaryString(file);
+  };
+
+  const btnRow = el('div', {className:'form-row'});
+  const cancel = el('button', {className:'btn btn-o', style:{flex:'1'}, onclick:()=>overlay.remove()}, 'CANCEL');
+  const submit = el('button', {className:'btn btn-g', style:{flex:'2'}}, 'IMPORT ALL');
+
+  submit.onclick = async () => {
+    if (!parsedRows.length) return toast('Error', 'No rows to import');
+    submit.disabled = true;
+    submit.textContent = `Importing 0/${parsedRows.length}...`;
+    let done = 0, errors = 0;
+
+    // Add unknown categories first
+    const knownCats = new Set(STATE.categories);
+    const newCats   = [...new Set(parsedRows.map(r=>r.category))].filter(c=>!knownCats.has(c));
+    for (const c of newCats) {
+      try { await api('POST', '/categories', {name:c}); STATE.categories.push(c); } catch {}
+    }
+
+    // Add unknown wallets
+    const knownWals = new Set(STATE.wallet.map(w=>w.name));
+    const newWals   = [...new Set(parsedRows.map(r=>r.wallet))].filter(w=>!knownWals.has(w));
+    for (const w of newWals) {
+      try { await api('POST', '/wallet', {name:w}); STATE.wallet.push({name:w,balance:0}); } catch {}
+    }
+
+    for (const row of parsedRows) {
+      try {
+        const tx = await api('POST', '/transactions', row);
+        STATE.transactions.unshift(tx);
+        done++;
+        submit.textContent = `Importing ${done}/${parsedRows.length}...`;
+      } catch { errors++; }
+    }
+
+    overlay.remove();
+    toast('Import Done', `${done} entries imported${errors?`, ${errors} failed`:''}`);
+    renderPage();
+  };
+
+  btnRow.append(cancel, submit);
+  modal.append(btnRow);
+  overlay.append(modal);
+  document.body.append(overlay);
+}
+
 // ─── ADD TRANSACTION MODAL ────────────────────────────────────────────────────
 function showAddTxModal() {
   const overlay = el('div', {className:'overlay', onclick:e=>{ if(e.target===overlay) overlay.remove(); }});
@@ -843,18 +979,19 @@ function renderWalletPage(container) {
     {sym:'SOL',name:'Solana',   price:cryptoPrices.SOL},
     {sym:'USDC',name:'USD Coin',price:cryptoPrices.USDC},
   ].forEach(c => {
-    cryptoCard.append(html(`
+    const row = html(`
       <div class="flex-between" style="padding:14px 0;border-bottom:1px solid var(--bdr)">
         <div class="flex-gap8">
           <div style="width:40px;height:40px;border-radius:50%;background:rgba(0,212,255,.1);border:1px solid rgba(0,212,255,.2);display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700">${c.sym[0]}</div>
           <div><div class="bold">${c.name}</div><div class="f11 mut">${c.sym}</div></div>
         </div>
         <div style="text-align:right">
-          <div style="font-family:Orbitron,sans-serif;font-size:16px;color:#00ff88">$${Number(c.price).toLocaleString()}</div>
+          <div class="crypto-price-val" data-sym="${c.sym}" style="font-family:Orbitron,sans-serif;font-size:16px;color:#00ff88">${c.price>0?'$'+Number(c.price).toLocaleString():'Loading...'}</div>
           <div class="pulse f11 mut">LIVE</div>
         </div>
       </div>
-    `));
+    `);
+    cryptoCard.append(row);
   });
   col.append(cryptoCard);
   container.append(col);
