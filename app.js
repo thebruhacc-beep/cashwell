@@ -77,11 +77,19 @@ function parseDate(raw) {
   const s = String(raw).trim();
   // YYYY-MM-DD
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-  // DD/MM/YYYY — altijd DD/MM want Belgian/European format
+  // DD/MM/YYYY — European format, auto-detect by checking which part > 12
   if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(s)) {
-    const [d,m,y] = s.split('/');
-    const day = d.padStart(2,'0'), mon = m.padStart(2,'0');
-    // Validate: month must be 1-12
+    const parts = s.split('/');
+    let day, mon;
+    const a = parseInt(parts[0]), b = parseInt(parts[1]);
+    const y = parts[2];
+    // If first number > 12, it must be the day (DD/MM)
+    // If second number > 12, it must be the day (MM/DD) — swap
+    // Otherwise assume DD/MM (European default)
+    if (a > 12) { day = parts[0]; mon = parts[1]; }
+    else if (b > 12) { day = parts[1]; mon = parts[0]; }
+    else { day = parts[0]; mon = parts[1]; } // assume DD/MM
+    day = day.padStart(2,'0'); mon = mon.padStart(2,'0');
     if (parseInt(mon) < 1 || parseInt(mon) > 12) return null;
     if (parseInt(day) < 1 || parseInt(day) > 31) return null;
     return `${y}-${mon}-${day}`;
@@ -936,9 +944,11 @@ function _openImportModal() {
     if (!file) return;
     const reader = new FileReader();
     reader.onload = e => {
-      const wb   = XLSX.read(e.target.result, {type:'binary', cellDates:true});
+      const wb   = XLSX.read(e.target.result, {type:'binary'});
       const ws   = wb.Sheets[wb.SheetNames[0]];
-      const rows = XLSX.utils.sheet_to_json(ws, {raw:true, cellDates:true});
+      // raw:false = SheetJS formats dates as strings using the cell format
+      // This avoids UTC timezone shifts from JS Date objects
+      const rows = XLSX.utils.sheet_to_json(ws, {raw:false, dateNF:'DD/MM/YYYY'});
       parsedRows = rows.map(r => {
         const rawDate   = r['Datum'] || r['Date'] || r['datum'] || r['date'] || '';
         const rawAmount = r['Bedrag'] || r['Amount'] || r['bedrag'] || r['amount'] || '0';
@@ -956,14 +966,18 @@ function _openImportModal() {
         preview.innerHTML = '<div class="f12 mut" style="padding:10px">No valid rows found. Check column names: Datum, Bedrag, Type</div>';
         return;
       }
+      const skipped = rows.length - parsedRows.length;
+      const info = el('div', {className:'f11 mut', style:{marginBottom:'6px'}});
+      info.textContent = `${parsedRows.length} rijen gevonden${skipped ? ` (${skipped} overgeslagen — ongeldige datum of bedrag 0)` : ''}`;
+      preview.append(info);
       const table = el('table', {style:{width:'100%',borderCollapse:'collapse',fontSize:'11px'}});
-      table.innerHTML = '<tr style="color:#64748b"><th style="text-align:left;padding:4px">Datum</th><th style="text-align:left;padding:4px">Bedrag</th><th style="text-align:left;padding:4px">Type</th><th style="text-align:left;padding:4px">Wallet</th></tr>';
+      table.innerHTML = '<tr style="color:#64748b"><th style="text-align:left;padding:4px">Datum (geparsed)</th><th style="text-align:left;padding:4px">Bedrag</th><th style="text-align:left;padding:4px">Type</th></tr>';
       parsedRows.slice(0,20).forEach(r => {
         const tr = el('tr', {style:{borderBottom:'1px solid var(--bdr)'}});
-        tr.innerHTML = `<td style="padding:4px">${r.date}</td><td style="padding:4px;color:${r.amount>=0?'#00ff88':'#ff3366'}">${r.amount>=0?'+':''}${r.amount}</td><td style="padding:4px">${r.category}</td><td style="padding:4px">${r.wallet}</td>`;
+        tr.innerHTML = `<td style="padding:4px">${r.date}</td><td style="padding:4px;color:${r.amount>=0?'#00ff88':'#ff3366'}">${r.amount>=0?'+':''}${r.amount}</td><td style="padding:4px">${r.category}</td>`;
         table.append(tr);
       });
-      if (parsedRows.length > 20) table.innerHTML += `<tr><td colspan="4" style="padding:4px;color:#64748b">...and ${parsedRows.length-20} more rows</td></tr>`;
+      if (parsedRows.length > 20) table.append(el('tr', {}, el('td', {colspan:'3', style:{padding:'4px',color:'#64748b'}}, `...en nog ${parsedRows.length-20} meer rijen`)));
       preview.append(table);
     };
     reader.readAsBinaryString(file);
