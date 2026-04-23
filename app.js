@@ -946,20 +946,72 @@ function _openImportModal() {
     reader.onload = e => {
       const wb   = XLSX.read(e.target.result, {type:'binary'});
       const ws   = wb.Sheets[wb.SheetNames[0]];
-      // raw:false = SheetJS formats dates as strings using the cell format
-      // This avoids UTC timezone shifts from JS Date objects
-      const rows = XLSX.utils.sheet_to_json(ws, {raw:false, dateNF:'DD/MM/YYYY'});
-      parsedRows = rows.map(r => {
-        const rawDate   = r['Datum'] || r['Date'] || r['datum'] || r['date'] || '';
-        const rawAmount = r['Bedrag'] || r['Amount'] || r['bedrag'] || r['amount'] || '0';
-        const rawType   = String(r['Type'] || r['Category'] || r['type'] || r['category'] || 'Other').trim();
-        const rawWallet = String(r['Wallet'] || r['wallet'] || (STATE.wallet[0]?.name || 'Cash')).trim();
-        const rawNote   = String(r['Note'] || r['Notitie'] || r['note'] || '').trim();
 
-        const date   = parseDate(rawDate);
-        const amount = parseFloat(String(rawAmount).replace(',','.')) || 0;
-        return { date, amount, category: rawType || 'Other', wallet: rawWallet, note: rawNote };
-      }).filter(r => r.date !== null && r.amount !== 0);
+      // Converteer Excel serienummer naar YYYY-MM-DD zonder Date objecten
+      // zodat timezone nooit een rol speelt
+      function excelSerialToDate(serial) {
+        // Excel epoch: 1 jan 1900 = dag 1 (met de bekende leap year bug)
+        const days = Math.floor(serial) - (serial >= 60 ? 2 : 1);
+        let y = 1900, d = days;
+        while (true) {
+          const leap = (y%4===0&&y%100!==0)||y%400===0;
+          const diy = leap ? 366 : 365;
+          if (d < diy) break;
+          d -= diy; y++;
+        }
+        const months = [31,((y%4===0&&y%100!==0)||y%400===0)?29:28,31,30,31,30,31,31,30,31,30,31];
+        let m = 0;
+        while (d >= months[m]) { d -= months[m]; m++; }
+        return `${y}-${String(m+1).padStart(2,'0')}-${String(d+1).padStart(2,'0')}`;
+      }
+
+      // Haal de raw cel waarden op (niet geformatteerde strings)
+      const headers = {};
+      const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
+      for (let c = range.s.c; c <= range.e.c; c++) {
+        const cell = ws[XLSX.utils.encode_cell({r: range.s.r, c})];
+        if (cell) headers[c] = String(cell.v).trim();
+      }
+
+      // Verwerk rijen
+      parsedRows = [];
+      for (let row = range.s.r + 1; row <= range.e.r; row++) {
+        const r = {};
+        for (let c = range.s.c; c <= range.e.c; c++) {
+          const cell = ws[XLSX.utils.encode_cell({r: row, c})];
+          const hdr  = headers[c];
+          if (hdr && cell) r[hdr] = cell;
+        }
+
+        const datCell = r['Datum'] || r['Date'] || r['datum'] || r['date'];
+        const amtCell = r['Bedrag'] || r['Amount'] || r['bedrag'] || r['amount'];
+        const typCell = r['Type'] || r['Category'] || r['type'] || r['category'];
+        const walCell = r['Wallet'] || r['wallet'];
+        const notCell = r['Note'] || r['Notitie'] || r['note'];
+
+        if (!datCell || !amtCell) continue;
+
+        // Datum: als het een nummer is = Excel serienummer, anders tekst parsen
+        let date;
+        if (datCell.t === 'n') {
+          date = excelSerialToDate(datCell.v);
+        } else {
+          date = parseDate(String(datCell.v).trim());
+        }
+        if (!date) continue;
+
+        const rawAmt = String(amtCell.v || '').replace(',','.');
+        const amount = parseFloat(rawAmt) || 0;
+        if (amount === 0) continue;
+
+        parsedRows.push({
+          date,
+          amount,
+          category: typCell ? String(typCell.v).trim() : 'Other',
+          wallet:   walCell ? String(walCell.v).trim() : (STATE.wallet[0]?.name || 'Cash'),
+          note:     notCell ? String(notCell.v).trim() : '',
+        });
+      }
 
       preview.innerHTML = '';
       if (!parsedRows.length) {
