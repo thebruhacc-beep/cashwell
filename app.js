@@ -565,10 +565,26 @@ function buildPeriodStatsInner() {
   const profits = txns.filter(t=>t.amount>0).reduce((s,t)=>s+t.amount,0);
   const losses  = txns.filter(t=>t.amount<0).reduce((s,t)=>s+t.amount,0);
 
-  // Records — best = hoogste dag/week/maand, worst = laagste
+  // Records — beste/slechtste dag/week/maand/jaar ooit (over ALLE transacties)
+  // Groepeer alle transacties per bucket type, zonder periode filter
+  function allTimeBuckets(period) {
+    const m = {};
+    const valid = STATE.transactions.filter(t => t.date && /^\d{4}-\d{2}-\d{2}$/.test(t.date));
+    valid.forEach(t => {
+      let k;
+      if      (period === 'day')   k = t.date;
+      else if (period === 'week')  { const d=new Date(t.date+'T12:00:00'); const s=new Date(d); s.setDate(d.getDate()-d.getDay()); k=localDateStr(s); }
+      else if (period === 'month') k = t.date.slice(0,7);
+      else if (period === 'year')  k = t.date.slice(0,4);
+      else                         k = t.date.slice(0,7);
+      m[k] = (m[k]||0) + t.amount;
+    });
+    return m;
+  }
+
   const recs = {};
   PERIODS.forEach(p => {
-    const b = bucketsByPeriod(STATE.transactions, p);
+    const b = allTimeBuckets(p);
     const v = Object.values(b).filter(x => x !== 0);
     recs[p] = {
       best:  v.length ? Math.max(...v) : null,
