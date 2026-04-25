@@ -182,18 +182,7 @@ router.post('/groups', requireAuth, (req, res) => {
 router.post('/groups/join', requireAuth, (req, res) => {
   const { code } = req.body || {};
   if (!code) return res.status(400).json({ error: 'code required' });
-
-  // Auto-clean stale group memberships (group was deleted or DB was reset)
-  const existingGid = userGroupId(req.user.id);
-  if (existingGid) {
-    const existingGroup = db.prepare('SELECT id FROM groups_table WHERE id=?').get(existingGid);
-    if (!existingGroup) {
-      // Group no longer exists, clean up membership
-      db.prepare('DELETE FROM group_members WHERE user_id=?').run(req.user.id);
-    } else {
-      return res.status(409).json({ error: 'Already in a group. Leave first.' });
-    }
-  }
+  if (userGroupId(req.user.id)) return res.status(409).json({ error: 'Already in a group. Leave first.' });
 
   const g = db.prepare('SELECT * FROM groups_table WHERE UPPER(code)=UPPER(?)').get(code.trim());
   if (!g) return res.status(404).json({ error: 'Invalid invite code' });
@@ -349,6 +338,72 @@ router.post('/messages/:id/vote', requireAuth, (req, res) => {
     db.prepare('INSERT INTO poll_votes (message_id,user_id,option_idx) VALUES (?,?,?)').run(req.params.id, req.user.id, optionIdx);
   }
   res.json({ ok: true });
+});
+
+
+// ─── GROUP MEMBER STATS (for profile modal) ───────────────────────────────────
+router.get('/groups/member/:userId/stats', requireAuth, (req, res) => {
+  // Allow viewing own stats OR stats of members in same group
+  const requesterGid = userGroupId(req.user.id);
+  const targetGid    = userGroupId(req.params.userId);
+  const isSelf       = req.user.id === req.params.userId;
+  if (!isSelf && (!requesterGid || requesterGid !== targetGid)) {
+    return res.status(403).json({ error: 'Not in same group' });
+  }
+
+  const userId = req.params.userId;
+  const txns   = db.prepare('SELECT * FROM transactions WHERE user_id=? ORDER BY date DESC').all(userId);
+  const wallets= db.prepare('SELECT * FROM wallet_types WHERE user_id=?').all(userId);
+  const confirmed = db.prepare("SELECT * FROM deposits WHERE user_id=? AND status='confirmed'").all(userId);
+
+  // Period helpers
+  const now   = new Date();
+  const pad   = n => String(n).padStart(2,'0');
+  const today = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}`;
+  const day   = now.getDay();
+  const wDiff = day === 0 ? 6 : day - 1;
+  const wStart= new Date(now); wStart.setDate(now.getDate()-wDiff);
+  const weekStart = `${wStart.getFullYear()}-${pad(wStart.getMonth()+1)}-${pad(wStart.getDate())}`;
+  const monthStart= `${now.getFullYear()}-${pad(now.getMonth()+1)}-01`;
+  const yearStart = `${now.getFullYear()}-01-01`;
+
+  const sum = arr => arr.reduce((s,t)=>s+t.amount,0);
+  const periodTxns = {
+    day:   txns.filter(t=>t.date===today),
+    week:  txns.filter(t=>t.date>=weekStart),
+    month: txns.filter(t=>t.date>=monthStart),
+    year:  txns.filter(t=>t.date>=yearStart),
+    total: txns,
+  };
+
+  const stats = {};
+  Object.entries(periodTxns).forEach(([p,arr]) => {
+    stats[p] = {
+      total:   +sum(arr).toFixed(2),
+      profit:  +sum(arr.filter(t=>t.amount>0)).toFixed(2),
+      loss:    +sum(arr.filter(t=>t.amount<0)).toFixed(2),
+      entries: arr.length,
+    };
+  });
+
+  // Best/worst day ever
+  const dayMap = {};
+  txns.forEach(t=>{ dayMap[t.date]=(dayMap[t.date]||0)+t.amount; });
+  const dayVals = Object.values(dayMap).filter(v=>v!==0);
+  const bestDay  = dayVals.length ? Math.max(...dayVals) : null;
+  const worstDay = dayVals.length ? Math.min(...dayVals) : null;
+
+  // Category breakdown (top 5)
+  const catMap = {};
+  txns.forEach(t=>{ catMap[t.category]=(catMap[t.category]||0)+t.amount; });
+  const categories = Object.entries(catMap)
+    .sort((a,b)=>b[1]-a[1])
+    .slice(0,5)
+    .map(([name,amount])=>({ name, amount:+amount.toFixed(2) }));
+
+  const totalDeposited = confirmed.reduce((s,d)=>s+d.amount,0);
+
+  res.json({ stats, wallets, bestDay, worstDay, categories, totalDeposited: +totalDeposited.toFixed(2), txCount: txns.length });
 });
 
 module.exports = router;

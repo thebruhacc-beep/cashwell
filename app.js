@@ -1282,7 +1282,11 @@ async function showMemberProfile(member) {
   try {
     data = await api('GET', `/groups/member/${member.id}/stats`);
   } catch(e) {
-    body.innerHTML = '<div class="mut f12 text-center" style="padding:30px">Could not load stats.</div>';
+    body.innerHTML = `<div class="mut f12 text-center" style="padding:30px">Error: ${e.message}</div>`;
+    return;
+  }
+  if (!data) {
+    body.innerHTML = '<div class="mut f12 text-center" style="padding:30px">No data returned.</div>';
     return;
   }
 
