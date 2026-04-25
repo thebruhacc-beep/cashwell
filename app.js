@@ -52,11 +52,37 @@ const todayStr  = () => {
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 };
 const localDateStr = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+// Calendar-based period boundaries
+function getWeekStart() {
+  const d = new Date();
+  const day = d.getDay(); // 0=sun,1=mon,...
+  const diff = (day === 0) ? 6 : day - 1; // Monday = start
+  d.setDate(d.getDate() - diff);
+  return localDateStr(d);
+}
+function getWeekEnd() {
+  const d = new Date();
+  const day = d.getDay();
+  const diff = (day === 0) ? 0 : 7 - day; // Sunday = end
+  d.setDate(d.getDate() + diff);
+  return localDateStr(d);
+}
+function getMonthStart() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-01`;
+}
+function getMonthEnd() {
+  const d = new Date(new Date().getFullYear(), new Date().getMonth()+1, 0);
+  return localDateStr(d);
+}
+function getYearStart() { return `${new Date().getFullYear()}-01-01`; }
+function getYearEnd()   { return `${new Date().getFullYear()}-12-31`; }
+
 const cutoffMap = {
   day:   () => todayStr(),
-  week:  () => { const d=new Date(); d.setDate(d.getDate()-7);         return localDateStr(d); },
-  month: () => { const d=new Date(); d.setDate(1); d.setMonth(d.getMonth()-1); return localDateStr(d); },
-  year:  () => { const d=new Date(); d.setDate(1); d.setFullYear(d.getFullYear()-1); return localDateStr(d); },
+  week:  () => getWeekStart(),
+  month: () => getMonthStart(),
+  year:  () => getYearStart(),
   total: () => '0000-00-00',
 };
 
@@ -117,11 +143,13 @@ function parseDate(raw) {
 }
 
 function filterByPeriod(txns, period) {
-  // First remove any transactions with invalid/missing dates
   const valid = txns.filter(t => t.date && /^\d{4}-\d{2}-\d{2}$/.test(t.date));
   if (period === 'day')   return valid.filter(t => t.date === todayStr());
   if (period === 'total') return valid;
-  return valid.filter(t => t.date >= cutoffMap[period]());
+  if (period === 'week')  return valid.filter(t => t.date >= getWeekStart()  && t.date <= getWeekEnd());
+  if (period === 'month') return valid.filter(t => t.date >= getMonthStart() && t.date <= getMonthEnd());
+  if (period === 'year')  return valid.filter(t => t.date >= getYearStart()  && t.date <= getYearEnd());
+  return valid;
 }
 
 function bucketsByPeriod(txns, period) {
@@ -650,7 +678,9 @@ function buildIncomeChartCard() {
         let c=0; cumData = dailyData.map(v=>{c+=v;return +c.toFixed(2);});
 
       } else if (p === 'week') {
-        const days = [...Array(7)].map((_,i)=>{ const d=new Date(); d.setDate(d.getDate()-(6-i)); return localDateStr(d); });
+        // Monday to Sunday of current week
+        const weekStart = new Date(getWeekStart()+'T12:00:00');
+        const days = [...Array(7)].map((_,i)=>{ const d=new Date(weekStart); d.setDate(weekStart.getDate()+i); return localDateStr(d); });
         const map = {}; days.forEach(d=>{map[d]=0;});
         txns.forEach(t=>{ if(map[t.date]!==undefined) map[t.date]+=t.amount; });
         labels = days.map(d=>new Date(d+'T12:00:00').toLocaleDateString('en',{weekday:'short'}));
@@ -658,7 +688,10 @@ function buildIncomeChartCard() {
         let c=0; cumData = dailyData.map(v=>{c+=v;return +c.toFixed(2);});
 
       } else if (p === 'month') {
-        const days = [...Array(30)].map((_,i)=>{ const d=new Date(); d.setDate(d.getDate()-(29-i)); return localDateStr(d); });
+        // 1st to last day of current month
+        const now2 = new Date();
+        const daysInMonth = new Date(now2.getFullYear(), now2.getMonth()+1, 0).getDate();
+        const days = [...Array(daysInMonth)].map((_,i)=>{ const d=new Date(now2.getFullYear(), now2.getMonth(), i+1); return localDateStr(d); });
         const map = {}; days.forEach(d=>{map[d]=0;});
         txns.forEach(t=>{ if(map[t.date]!==undefined) map[t.date]+=t.amount; });
         labels = days.map(d=>d.slice(5));
@@ -1220,6 +1253,141 @@ function renderWalletPage(container) {
   fetchCryptoPrices();
 }
 
+
+// ─── MEMBER PROFILE MODAL ─────────────────────────────────────────────────────
+const PERIOD_LABELS2 = {day:'Today',week:'This Week',month:'This Month',year:'This Year',total:'All Time'};
+const PERIODS2 = ['day','week','month','year','total'];
+const SLICE_COLORS2 = ['#00ff88','#00d4ff','#a78bfa','#f59e0b','#ff3366','#10b981'];
+
+async function showMemberProfile(member) {
+  const overlay = el('div', {className:'overlay', onclick:e=>{ if(e.target===overlay) overlay.remove(); }});
+  const modal   = el('div', {className:'modal slide', style:{maxWidth:'520px',width:'95vw',maxHeight:'90vh',overflowY:'auto'}});
+
+  // Header
+  const hdr = el('div', {style:{display:'flex',alignItems:'center',gap:'16px',marginBottom:'24px'}});
+  const av  = el('div', {className:'avatar-circle', style:{width:'56px',height:'56px',fontSize:'22px',flexShrink:'0'}}, member.avatar||member.username[0].toUpperCase());
+  const nameBox = el('div');
+  nameBox.innerHTML = `<div style="font-family:Orbitron,sans-serif;font-size:18px;color:#00d4ff">${member.display_name||member.username}</div><div class="f12 mut">@${member.username}</div>`;
+  hdr.append(av, nameBox);
+  modal.append(hdr);
+
+  // Loading state
+  const body = el('div');
+  body.innerHTML = '<div class="mut f12 text-center" style="padding:30px">Loading stats...</div>';
+  modal.append(body);
+  overlay.append(modal);
+  document.body.append(overlay);
+
+  let data;
+  try {
+    data = await api('GET', `/groups/member/${member.id}/stats`);
+  } catch(e) {
+    body.innerHTML = '<div class="mut f12 text-center" style="padding:30px">Could not load stats.</div>';
+    return;
+  }
+
+  body.innerHTML = '';
+
+  // Period selector
+  let activePeriod = 'total';
+  const tabRow = el('div', {style:{display:'flex',gap:'6px',marginBottom:'16px',flexWrap:'wrap'}});
+
+  function buildBody() {
+    body.innerHTML = '';
+    body.append(tabRow);
+
+    const s = data.stats[activePeriod];
+
+    // Main stat card
+    const mainCard = el('div', {style:{padding:'20px 24px',background:s.total>=0?'rgba(0,255,136,.06)':'rgba(255,51,102,.06)',border:`1px solid ${s.total>=0?'rgba(0,255,136,.2)':'rgba(255,51,102,.2)'}`,borderRadius:'12px',marginBottom:'16px'}});
+    mainCard.innerHTML = `
+      <div class="f11 mut" style="letter-spacing:2px;margin-bottom:6px">${PERIOD_LABELS2[activePeriod].toUpperCase()} PERFORMANCE</div>
+      <div style="font-family:Orbitron,sans-serif;font-size:36px;font-weight:900;color:${s.total>=0?'#00ff88':'#ff3366'}">${s.total>=0?'+':''}$${Math.abs(s.total).toFixed(2)}</div>
+      <div style="display:flex;gap:24px;margin-top:14px;flex-wrap:wrap">
+        <div><div class="f10 mut">PROFIT</div><div style="color:#00ff88;font-family:Orbitron,sans-serif;font-size:13px;margin-top:2px">+$${s.profit.toFixed(2)}</div></div>
+        <div><div class="f10 mut">LOSS</div><div style="color:#ff3366;font-family:Orbitron,sans-serif;font-size:13px;margin-top:2px">-$${Math.abs(s.loss).toFixed(2)}</div></div>
+        <div><div class="f10 mut">ENTRIES</div><div style="color:#00d4ff;font-family:Orbitron,sans-serif;font-size:13px;margin-top:2px">${s.entries}</div></div>
+      </div>
+    `;
+    body.append(mainCard);
+
+    // Records row
+    const recsRow = el('div', {style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px',marginBottom:'16px'}});
+    const bestCard = el('div', {className:'record-bar best'});
+    bestCard.innerHTML = `<div><div class="record-label">BEST DAY</div><div class="record-value ny">${data.bestDay!==null?'$'+Math.abs(data.bestDay).toFixed(2):'—'}</div></div><span style="font-size:20px">🏆</span>`;
+    const worstCard = el('div', {className:'record-bar worst'});
+    worstCard.innerHTML = `<div><div class="record-label">WORST DAY</div><div class="record-value nr">${data.worstDay!==null?'$'+Math.abs(data.worstDay).toFixed(2):'—'}</div></div><span style="font-size:20px">📉</span>`;
+    recsRow.append(bestCard, worstCard);
+    body.append(recsRow);
+
+    // Wallet breakdown
+    if (data.wallets.length) {
+      const walletCard = el('div', {style:{padding:'16px',background:'rgba(255,255,255,.03)',border:'1px solid var(--bdr)',borderRadius:'12px',marginBottom:'16px'}});
+      walletCard.innerHTML = '<div class="f11 mut" style="letter-spacing:2px;margin-bottom:12px">WALLETS</div>';
+      const totalBal = data.wallets.reduce((s,w)=>s+w.balance,0);
+      walletCard.innerHTML += `<div style="font-family:Orbitron,sans-serif;font-size:22px;color:#00ff88;margin-bottom:10px">$${totalBal.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</div>`;
+      data.wallets.filter(w=>w.balance>0).forEach((w,i) => {
+        const pct = totalBal>0 ? (w.balance/totalBal*100).toFixed(1) : 0;
+        const color = SLICE_COLORS2[i%SLICE_COLORS2.length];
+        const row2 = el('div', {style:{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'6px 0',borderBottom:'1px solid var(--bdr)'}});
+        row2.innerHTML = `
+          <div style="display:flex;align-items:center;gap:8px">
+            <div style="width:8px;height:8px;border-radius:50%;background:${color}"></div>
+            <span class="f12">${w.name}</span>
+          </div>
+          <div style="text-align:right">
+            <span style="color:${color};font-family:Orbitron,sans-serif;font-size:12px">$${w.balance.toFixed(2)}</span>
+            <span class="f10 mut" style="margin-left:6px">${pct}%</span>
+          </div>
+        `;
+        walletCard.append(row2);
+      });
+      body.append(walletCard);
+    }
+
+    // Top categories
+    if (data.categories.length) {
+      const catCard = el('div', {style:{padding:'16px',background:'rgba(255,255,255,.03)',border:'1px solid var(--bdr)',borderRadius:'12px',marginBottom:'16px'}});
+      catCard.innerHTML = '<div class="f11 mut" style="letter-spacing:2px;margin-bottom:12px">TOP CATEGORIES</div>';
+      data.categories.forEach((c,i) => {
+        const color = c.amount>=0 ? SLICE_COLORS2[i%SLICE_COLORS2.length] : '#ff3366';
+        const row3  = el('div', {style:{display:'flex',justifyContent:'space-between',padding:'6px 0',borderBottom:'1px solid var(--bdr)'}});
+        row3.innerHTML = `<span class="f12">${c.name}</span><span style="color:${color};font-family:Orbitron,sans-serif;font-size:12px">${c.amount>=0?'+':''}$${c.amount.toFixed(2)}</span>`;
+        catCard.append(row3);
+      });
+      body.append(catCard);
+    }
+
+    // Group contribution
+    const contCard = el('div', {style:{padding:'14px 16px',background:'rgba(0,212,255,.05)',border:'1px solid rgba(0,212,255,.15)',borderRadius:'12px',display:'flex',justifyContent:'space-between',alignItems:'center'}});
+    contCard.innerHTML = `
+      <div><div class="f10 mut" style="letter-spacing:2px">GROUP CONTRIBUTION</div><div style="font-family:Orbitron,sans-serif;font-size:18px;color:#00d4ff;margin-top:4px">$${data.totalDeposited.toFixed(2)}</div></div>
+      <div style="text-align:right"><div class="f10 mut">TOTAL ENTRIES</div><div style="font-family:Orbitron,sans-serif;font-size:18px;color:#a78bfa;margin-top:4px">${data.txCount}</div></div>
+    `;
+    body.append(contCard);
+  }
+
+  // Build period tabs
+  PERIODS2.forEach(p => {
+    const btn = el('button', {
+      className: `ptab ${p===activePeriod?'active':''}`,
+      onclick: () => {
+        activePeriod = p;
+        tabRow.querySelectorAll('.ptab').forEach(b=>b.classList.remove('active'));
+        btn.classList.add('active');
+        buildBody();
+      }
+    }, PERIOD_LABELS2[p].toUpperCase());
+    tabRow.append(btn);
+  });
+
+  buildBody();
+
+  // Close button
+  const closeBtn = el('button', {className:'btn btn-o mt12 btn-full', onclick:()=>overlay.remove()}, 'CLOSE');
+  modal.append(closeBtn);
+}
+
 // ─── GROUPS PAGE ──────────────────────────────────────────────────────────────
 function renderGroupsPage(container) {
   const col = el('div', {className:'flex-col', style:{gap:'20px'}});
@@ -1380,7 +1548,8 @@ function buildGroupInfoCard() {
   card.append(infoBox);
 
   STATE.group.members.forEach((m,i) => {
-    const row = el('div', {className:'list-row', style:{border:'1px solid var(--bdr)',marginBottom:'6px'}});
+    const row = el('div', {className:'list-row', style:{border:'1px solid var(--bdr)',marginBottom:'6px',cursor:'pointer'}});
+    row.onclick = () => showMemberProfile(m);
     const avatar = el('div', {className:'avatar-circle'}, m.avatar||m.username[0].toUpperCase());
     const info   = el('div', {style:{flex:'1'}});
     info.innerHTML = `<div class="f13">${m.display_name||m.username} ${m.id===STATE.user.id?'<span class="nb f11">YOU</span>':''}</div><div class="f11" style="color:#00ff88">@${m.username} · $${(memberTotals[m.id]||0).toFixed(2)}</div>`;
@@ -1734,36 +1903,172 @@ function renderChatPage(container) {
 }
 
 // ─── LEADERBOARD ──────────────────────────────────────────────────────────────
+let lbPeriod = 'month';
+
 function renderLeaderboard(container) {
   const col = el('div', {className:'flex-col', style:{gap:'20px'}});
 
-  if (STATE.group) {
-    const card = el('div', {className:'card'});
-    card.innerHTML = `<div class="section-title mb16">LEADERBOARD · ${STATE.group.name}</div>`;
-    const confirmed = STATE.deposits.filter(d=>d.status==='confirmed');
-    const medals = ['🥇','🥈','🥉'];
-    STATE.group.members.forEach((m,i) => {
-      const contrib = confirmed.filter(d=>d.user_id===m.id).reduce((s,d)=>s+d.amount,0);
-      const row = el('div', {className:`list-row ${i===0?'gold-row':''}`, style:{marginBottom:'6px'}});
-      row.innerHTML = `
-        <div style="width:28px;text-align:center;font-size:${i<3?18:14}px">${medals[i]||i+1}</div>
-        <div class="avatar-circle">${m.avatar||m.username[0].toUpperCase()}</div>
-        <div style="flex:1">
-          <div class="f13 ${m.id===STATE.user.id?'bold':''}">${m.display_name||m.username} ${m.id===STATE.user.id?'<span class="nb f11">YOU</span>':''}</div>
-          <div class="f11 mut">Fund: <span style="color:#00ff88">$${contrib.toFixed(0)}</span></div>
-        </div>
-      `;
-      card.append(row);
-    });
-    col.append(card);
-  } else {
-    col.append(html('<div class="card text-center mut f12" style="padding:40px">Join a group to see rankings</div>'));
+  if (!STATE.group) {
+    col.append(html('<div class="card text-center mut f12" style="padding:60px">Join a group to see rankings</div>'));
+    container.append(col);
+    return;
   }
 
-  const statsCard = el('div', {className:'card'});
-  statsCard.innerHTML = '<div class="section-title mb16">YOUR STATS</div>';
-  statsCard.append(buildPeriodStats());
-  col.append(statsCard);
+  const confirmed = STATE.deposits.filter(d=>d.status==='confirmed');
+  const medals = ['🥇','🥈','🥉'];
+  const PLBLS = {day:'TODAY',week:'THIS WEEK',month:'THIS MONTH',year:'THIS YEAR',total:'ALL TIME'};
+
+  // ── Period tabs ──
+  const tabsWrap = el('div', {style:{display:'flex',gap:'6px',flexWrap:'wrap'}});
+  ['day','week','month','year','total'].forEach(p => {
+    const b = el('button', {
+      className:`ptab ${p===lbPeriod?'active':''}`,
+      onclick:() => { lbPeriod=p; container.innerHTML=''; renderLeaderboard(container); }
+    }, PLBLS[p]);
+    tabsWrap.append(b);
+  });
+  col.append(tabsWrap);
+
+  // ── Group hero banner ──
+  const banner = el('div', {style:{
+    background:'linear-gradient(135deg,rgba(0,212,255,.08),rgba(167,139,250,.08))',
+    border:'1px solid rgba(0,212,255,.2)', borderRadius:'16px', padding:'24px'
+  }});
+
+  // Calculate group total for period using all member transactions
+  // We show each member's personal profit/loss for the selected period
+  // For the banner: show group name + period label
+  banner.innerHTML = `
+    <div style="display:flex;align-items:center;gap:14px;margin-bottom:6px">
+      <div style="font-size:28px">◆</div>
+      <div>
+        <div style="font-family:Orbitron,sans-serif;font-size:20px;color:#00d4ff">${STATE.group.name}</div>
+        <div class="f11 mut" style="margin-top:2px">${STATE.group.members.length} member${STATE.group.members.length!==1?'s':''} · ${PLBLS[lbPeriod]} RANKINGS</div>
+      </div>
+    </div>
+  `;
+  col.append(banner);
+
+  // ── Member cards — sorted by fund contribution ──
+  const membersCard = el('div', {className:'card'});
+  membersCard.innerHTML = `<div class="section-title mb16">MEMBER RANKINGS</div>`;
+
+  // Sort by fund contribution (deposits)
+  const sorted = [...STATE.group.members].map(m => ({
+    ...m,
+    contrib: confirmed.filter(d=>d.user_id===m.id).reduce((s,d)=>s+d.amount,0)
+  })).sort((a,b)=>b.contrib-a.contrib);
+
+  sorted.forEach((m,i) => {
+    const isYou = m.id === STATE.user.id;
+    const medal = medals[i] || `${i+1}`;
+    const color = i===0?'#f59e0b':i===1?'#94a3b8':i===2?'#b45309':'#64748b';
+
+    const row = el('div', {
+      style:{
+        display:'flex', alignItems:'center', gap:'14px',
+        padding:'14px 16px', marginBottom:'8px',
+        background: isYou?'rgba(0,212,255,.06)':'rgba(255,255,255,.02)',
+        border:`1px solid ${isYou?'rgba(0,212,255,.25)':'var(--bdr)'}`,
+        borderRadius:'12px', cursor:'pointer', transition:'all .2s'
+      },
+      onclick: () => showMemberProfile(m)
+    });
+
+    row.onmouseenter = () => { row.style.background = isYou?'rgba(0,212,255,.1)':'rgba(255,255,255,.05)'; row.style.transform='translateX(4px)'; };
+    row.onmouseleave = () => { row.style.background = isYou?'rgba(0,212,255,.06)':'rgba(255,255,255,.02)'; row.style.transform=''; };
+
+    const rankBadge = el('div', {style:{
+      width:'36px', height:'36px', borderRadius:'50%',
+      background:`rgba(${i===0?'245,158,11':i===1?'148,163,184':i===2?'180,83,9':'100,116,139'},.15)`,
+      border:`2px solid ${color}`,
+      display:'flex', alignItems:'center', justifyContent:'center',
+      fontSize: i<3?'18px':'13px', fontWeight:'700', flexShrink:'0'
+    }}, medal);
+
+    const av = el('div', {className:'avatar-circle', style:{width:'40px',height:'40px',fontSize:'16px',flexShrink:'0'}},
+      m.avatar||m.username[0].toUpperCase());
+
+    const info = el('div', {style:{flex:'1',minWidth:'0'}});
+    info.innerHTML = `
+      <div style="display:flex;align-items:center;gap:6px">
+        <span style="font-size:14px;font-weight:${isYou?'700':'400'}">${m.display_name||m.username}</span>
+        ${isYou?'<span class="nb f10" style="padding:1px 6px;border-radius:4px">YOU</span>':''}
+      </div>
+      <div class="f11 mut">@${m.username}</div>
+    `;
+
+    const stats = el('div', {style:{textAlign:'right',flexShrink:'0'}});
+    stats.innerHTML = `
+      <div style="font-family:Orbitron,sans-serif;font-size:14px;color:#00ff88">$${m.contrib.toFixed(2)}</div>
+      <div class="f10 mut">fund</div>
+    `;
+
+    const arrow = el('div', {style:{color:'#64748b',fontSize:'12px',flexShrink:'0'}}, '›');
+
+    row.append(rankBadge, av, info, stats, arrow);
+    membersCard.append(row);
+  });
+
+  membersCard.append(html(`<div class="f10 mut text-center" style="margin-top:8px;padding-top:8px;border-top:1px solid var(--bdr)">Click a member to view their full stats</div>`));
+  col.append(membersCard);
+
+  // ── Fund contribution bar chart ──
+  const totalContrib = sorted.reduce((s,m)=>s+m.contrib,0);
+  if (totalContrib > 0) {
+    const fundCard = el('div', {className:'card'});
+    fundCard.innerHTML = '<div class="section-title mb16">FUND CONTRIBUTIONS</div>';
+    sorted.forEach((m,i) => {
+      const pct = totalContrib>0?(m.contrib/totalContrib*100):0;
+      const color = SLICE_COLORS[i%SLICE_COLORS.length];
+      const barRow = el('div', {style:{marginBottom:'12px'}});
+      barRow.innerHTML = `
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <span class="f12">${m.display_name||m.username} ${m.id===STATE.user.id?'(you)':''}</span>
+          <span style="color:${color};font-family:Orbitron,sans-serif;font-size:11px">$${m.contrib.toFixed(2)} · ${pct.toFixed(1)}%</span>
+        </div>
+        <div class="prog"><div class="prog-f" style="width:${pct}%;background:${color};transition:width .6s ease"></div></div>
+      `;
+      fundCard.append(barRow);
+    });
+    col.append(fundCard);
+  }
+
+  // ── Your personal stats for the period ──
+  const myCard = el('div', {className:'card'});
+  myCard.innerHTML = `<div class="section-title mb16">YOUR ${PLBLS[lbPeriod]} STATS</div>`;
+  const myTxns = filterByPeriod(STATE.transactions, lbPeriod);
+  const myTotal = myTxns.reduce((s,t)=>s+t.amount,0);
+  const myProfit = myTxns.filter(t=>t.amount>0).reduce((s,t)=>s+t.amount,0);
+  const myLoss   = myTxns.filter(t=>t.amount<0).reduce((s,t)=>s+t.amount,0);
+
+  const myStatRow = el('div', {style:{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'12px',marginBottom:'12px'}});
+  [
+    {label:'PERFORMANCE', val: fmt(myTotal), color: myTotal>=0?'#00ff88':'#ff3366'},
+    {label:'PROFIT',      val: `+$${myProfit.toFixed(2)}`, color:'#00ff88'},
+    {label:'LOSS',        val: fmt(myLoss), color:'#ff3366'},
+  ].forEach(s => {
+    const box = el('div', {style:{padding:'14px',background:'rgba(255,255,255,.03)',border:'1px solid var(--bdr)',borderRadius:'10px',textAlign:'center'}});
+    box.innerHTML = `<div class="f10 mut" style="margin-bottom:6px;letter-spacing:1px">${s.label}</div><div style="font-family:Orbitron,sans-serif;font-size:16px;color:${s.color}">${s.val}</div>`;
+    myStatRow.append(box);
+  });
+  myCard.append(myStatRow);
+
+  // Wallet breakdown
+  if (STATE.wallet.length) {
+    const totalBal = STATE.wallet.reduce((s,w)=>s+w.balance,0);
+    const walletRow = el('div', {style:{display:'flex',gap:'8px',flexWrap:'wrap'}});
+    STATE.wallet.filter(w=>w.balance>0).forEach((w,i) => {
+      const color = SLICE_COLORS[i%SLICE_COLORS.length];
+      const pct = totalBal>0?(w.balance/totalBal*100).toFixed(0):0;
+      const box = el('div', {style:{flex:'1',minWidth:'80px',padding:'10px 12px',background:`rgba(${i===0?'0,255,136':i===1?'0,212,255':'167,139,250'},.06)`,border:`1px solid ${color}33`,borderRadius:'10px'}});
+      box.innerHTML = `<div class="f10 mut mb4">${w.name}</div><div style="font-family:Orbitron,sans-serif;font-size:13px;color:${color}">$${w.balance.toFixed(2)}</div><div class="f10 mut">${pct}%</div>`;
+      walletRow.append(box);
+    });
+    myCard.append(walletRow);
+  }
+
+  col.append(myCard);
   container.append(col);
 }
 
