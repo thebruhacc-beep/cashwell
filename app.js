@@ -1545,7 +1545,9 @@ function renderGroupsPage(container) {
     col.append(buildFundCard(), buildDepositActions(), buildPaymentDetailsCard(), buildGroupInfoCard());
     // Admin panel — only visible to admin
     if (STATE.group.admin_id === STATE.user.id) {
-      col.append(buildAdminPanel());
+      const adminPlaceholder = el('div');
+      col.append(adminPlaceholder);
+      buildAdminPanel().then(card => adminPlaceholder.replaceWith(card));
     }
   }
   container.append(col);
