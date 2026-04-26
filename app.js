@@ -1301,8 +1301,10 @@ async function showMemberProfile(member) {
     body.append(tabRow);
 
     const s = data.stats[activePeriod];
+    const PERIOD_UNIT = {day:'DAY',week:'WEEK',month:'MONTH',year:'YEAR',total:'ALL TIME'};
+    const unit = PERIOD_UNIT[activePeriod];
 
-    // Main stat card
+    // Main performance card
     const mainCard = el('div', {style:{padding:'20px 24px',background:s.total>=0?'rgba(0,255,136,.06)':'rgba(255,51,102,.06)',border:`1px solid ${s.total>=0?'rgba(0,255,136,.2)':'rgba(255,51,102,.2)'}`,borderRadius:'12px',marginBottom:'16px'}});
     mainCard.innerHTML = `
       <div class="f11 mut" style="letter-spacing:2px;margin-bottom:6px">${PERIOD_LABELS2[activePeriod].toUpperCase()} PERFORMANCE</div>
@@ -1315,48 +1317,59 @@ async function showMemberProfile(member) {
     `;
     body.append(mainCard);
 
-    // Records row
+    // Best / Worst for selected period
     const recsRow = el('div', {style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px',marginBottom:'16px'}});
-    const bestCard = el('div', {className:'record-bar best'});
-    bestCard.innerHTML = `<div><div class="record-label">BEST DAY</div><div class="record-value ny">${data.bestDay!==null?'$'+Math.abs(data.bestDay).toFixed(2):'—'}</div></div><span style="font-size:20px">🏆</span>`;
-    const worstCard = el('div', {className:'record-bar worst'});
-    worstCard.innerHTML = `<div><div class="record-label">WORST DAY</div><div class="record-value nr">${data.worstDay!==null?'$'+Math.abs(data.worstDay).toFixed(2):'—'}</div></div><span style="font-size:20px">📉</span>`;
-    recsRow.append(bestCard, worstCard);
+    const bestVal  = s.best  !== undefined && s.best  !== null ? '$'+Math.abs(s.best).toFixed(2)  : '—';
+    const worstVal = s.worst !== undefined && s.worst !== null ? '$'+Math.abs(s.worst).toFixed(2) : '—';
+    const bestCard2 = el('div', {className:'record-bar best'});
+    bestCard2.innerHTML = `<div><div class="record-label">BEST ${unit}</div><div class="record-value ny">${bestVal}</div></div><span style="font-size:20px">🏆</span>`;
+    const worstCard2 = el('div', {className:'record-bar worst'});
+    worstCard2.innerHTML = `<div><div class="record-label">WORST ${unit}</div><div class="record-value nr">${worstVal}</div></div><span style="font-size:20px">📉</span>`;
+    recsRow.append(bestCard2, worstCard2);
     body.append(recsRow);
+
+    // Net worth = wallet total
+    const totalBal = data.wallets.reduce((sum,w)=>sum+w.balance,0);
+    const nwCard = el('div', {style:{padding:'14px 16px',background:'rgba(167,139,250,.06)',border:'1px solid rgba(167,139,250,.2)',borderRadius:'12px',marginBottom:'16px',display:'flex',justifyContent:'space-between',alignItems:'center'}});
+    nwCard.innerHTML = `
+      <div><div class="f10 mut" style="letter-spacing:2px;margin-bottom:4px">NET WORTH</div>
+      <div style="font-family:Orbitron,sans-serif;font-size:22px;color:#a78bfa">$${totalBal.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</div></div>
+      <div style="font-size:24px">💎</div>
+    `;
+    body.append(nwCard);
 
     // Wallet breakdown
     if (data.wallets.length) {
       const walletCard = el('div', {style:{padding:'16px',background:'rgba(255,255,255,.03)',border:'1px solid var(--bdr)',borderRadius:'12px',marginBottom:'16px'}});
       walletCard.innerHTML = '<div class="f11 mut" style="letter-spacing:2px;margin-bottom:12px">WALLETS</div>';
-      const totalBal = data.wallets.reduce((s,w)=>s+w.balance,0);
-      walletCard.innerHTML += `<div style="font-family:Orbitron,sans-serif;font-size:22px;color:#00ff88;margin-bottom:10px">$${totalBal.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</div>`;
-      data.wallets.filter(w=>w.balance>0).forEach((w,i) => {
+      data.wallets.filter(w=>w.balance>=0).forEach((w,i) => {
         const pct = totalBal>0 ? (w.balance/totalBal*100).toFixed(1) : 0;
         const color = SLICE_COLORS2[i%SLICE_COLORS2.length];
-        const row2 = el('div', {style:{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'6px 0',borderBottom:'1px solid var(--bdr)'}});
+        const row2 = el('div', {style:{marginBottom:'10px'}});
         row2.innerHTML = `
-          <div style="display:flex;align-items:center;gap:8px">
-            <div style="width:8px;height:8px;border-radius:50%;background:${color}"></div>
-            <span class="f12">${w.name}</span>
+          <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+            <div style="display:flex;align-items:center;gap:6px">
+              <div style="width:8px;height:8px;border-radius:50%;background:${color}"></div>
+              <span class="f12">${w.name}</span>
+            </div>
+            <span style="color:${color};font-family:Orbitron,sans-serif;font-size:12px">$${w.balance.toFixed(2)} <span class="f10 mut">${pct}%</span></span>
           </div>
-          <div style="text-align:right">
-            <span style="color:${color};font-family:Orbitron,sans-serif;font-size:12px">$${w.balance.toFixed(2)}</span>
-            <span class="f10 mut" style="margin-left:6px">${pct}%</span>
-          </div>
+          <div class="prog"><div class="prog-f" style="width:${pct}%;background:${color}"></div></div>
         `;
         walletCard.append(row2);
       });
       body.append(walletCard);
     }
 
-    // Top categories
-    if (data.categories.length) {
+    // Top categories for active period
+    const periodCats = Array.isArray(data.categories) ? data.categories : (data.categories[activePeriod] || []);
+    if (periodCats.length) {
       const catCard = el('div', {style:{padding:'16px',background:'rgba(255,255,255,.03)',border:'1px solid var(--bdr)',borderRadius:'12px',marginBottom:'16px'}});
       catCard.innerHTML = '<div class="f11 mut" style="letter-spacing:2px;margin-bottom:12px">TOP CATEGORIES</div>';
-      data.categories.forEach((c,i) => {
+      periodCats.forEach((c,i) => {
         const color = c.amount>=0 ? SLICE_COLORS2[i%SLICE_COLORS2.length] : '#ff3366';
         const row3  = el('div', {style:{display:'flex',justifyContent:'space-between',padding:'6px 0',borderBottom:'1px solid var(--bdr)'}});
-        row3.innerHTML = `<span class="f12">${c.name}</span><span style="color:${color};font-family:Orbitron,sans-serif;font-size:12px">${c.amount>=0?'+':''}$${c.amount.toFixed(2)}</span>`;
+        row3.innerHTML = `<span class="f12">${c.name}</span><span style="color:${color};font-family:Orbitron,sans-serif;font-size:12px">${c.amount>=0?'+':''}$${Math.abs(c.amount).toFixed(2)}</span>`;
         catCard.append(row3);
       });
       body.append(catCard);
@@ -1365,7 +1378,7 @@ async function showMemberProfile(member) {
     // Group contribution
     const contCard = el('div', {style:{padding:'14px 16px',background:'rgba(0,212,255,.05)',border:'1px solid rgba(0,212,255,.15)',borderRadius:'12px',display:'flex',justifyContent:'space-between',alignItems:'center'}});
     contCard.innerHTML = `
-      <div><div class="f10 mut" style="letter-spacing:2px">GROUP CONTRIBUTION</div><div style="font-family:Orbitron,sans-serif;font-size:18px;color:#00d4ff;margin-top:4px">$${data.totalDeposited.toFixed(2)}</div></div>
+      <div><div class="f10 mut" style="letter-spacing:2px">GROUP FUND CONTRIBUTION</div><div style="font-family:Orbitron,sans-serif;font-size:18px;color:#00d4ff;margin-top:4px">$${data.totalDeposited.toFixed(2)}</div></div>
       <div style="text-align:right"><div class="f10 mut">TOTAL ENTRIES</div><div style="font-family:Orbitron,sans-serif;font-size:18px;color:#a78bfa;margin-top:4px">${data.txCount}</div></div>
     `;
     body.append(contCard);
@@ -1392,6 +1405,136 @@ async function showMemberProfile(member) {
   modal.append(closeBtn);
 }
 
+// ─── ADMIN PANEL ─────────────────────────────────────────────────────────────
+async function buildAdminPanel() {
+  const card = el('div', {className:'card'});
+  card.innerHTML = `
+    <div class="section-title mb4" style="color:#f59e0b">⚡ ADMIN PANEL</div>
+    <div class="f11 mut mb16">Adjust member wallet balances and track investments</div>
+    <div id="admin-members-list"><div class="mut f12">Loading members...</div></div>
+  `;
+
+  let members = [];
+  try {
+    members = await api('GET', '/groups/admin/members');
+  } catch(e) {
+    card.querySelector('#admin-members-list').innerHTML = `<div class="mut f12">Error: ${e.message}</div>`;
+    return card;
+  }
+
+  const list = card.querySelector('#admin-members-list');
+  list.innerHTML = '';
+
+  members.forEach(m => {
+    const memberBlock = el('div', {style:{marginBottom:'20px',padding:'16px',background:'rgba(255,255,255,.02)',border:'1px solid var(--bdr)',borderRadius:'12px'}});
+
+    const totalBal = m.wallets.reduce((s,w)=>s+w.balance,0);
+    memberBlock.innerHTML = `
+      <div class="flex-between mb12">
+        <div class="flex-gap8">
+          <div class="avatar-circle" style="width:32px;height:32px;font-size:13px">${m.avatar||m.username[0].toUpperCase()}</div>
+          <div>
+            <div class="f13 bold">${m.display_name||m.username} ${m.id===STATE.user.id?'<span class="nb f10">YOU</span>':''}</div>
+            <div class="f10 mut">Net Worth: <span style="color:#a78bfa">$${totalBal.toFixed(2)}</span></div>
+          </div>
+        </div>
+        <button class="btn btn-gh btn-sm" onclick="showAdminEditModal('${m.id}','${(m.display_name||m.username).replace(/'/g,"\'")}')">EDIT WALLETS</button>
+      </div>
+    `;
+
+    // Wallet rows
+    if (m.wallets.length) {
+      m.wallets.forEach(w => {
+        const wRow = el('div', {style:{display:'flex',justifyContent:'space-between',padding:'4px 0',borderBottom:'1px solid rgba(255,255,255,.04)'}});
+        wRow.innerHTML = `<span class="f11 mut">${w.name}</span><span class="f11" style="color:#00ff88;font-family:Orbitron,sans-serif">$${w.balance.toFixed(2)}</span>`;
+        memberBlock.append(wRow);
+      });
+    } else {
+      memberBlock.append(html('<div class="f11 mut" style="padding:4px 0">No wallets yet</div>'));
+    }
+
+    list.append(memberBlock);
+  });
+
+  return card;
+}
+
+async function showAdminEditModal(userId, displayName) {
+  const overlay = el('div', {className:'overlay', onclick:e=>{ if(e.target===overlay) overlay.remove(); }});
+  const modal   = el('div', {className:'modal slide'});
+  modal.innerHTML = `<div class="modal-title nb">EDIT WALLETS · ${displayName}</div><div class="modal-sub">Adjust balances and log investments</div>`;
+
+  // Load member wallets
+  let members = [];
+  try { members = await api('GET', '/groups/admin/members'); } catch {}
+  const member = members.find(m=>m.id===userId);
+  const wallets = member?.wallets || [];
+
+  const walletList = el('div', {style:{marginBottom:'16px'}});
+
+  function renderWalletList() {
+    walletList.innerHTML = '';
+    const allWallets = [...wallets];
+
+    allWallets.forEach((w,i) => {
+      const row = el('div', {style:{display:'flex',gap:'8px',alignItems:'center',marginBottom:'8px'}});
+      const nameInp = el('input', {className:'inp', style:{flex:'1',fontSize:'12px'}, value:w.name, placeholder:'Wallet name'});
+      const balInp  = el('input', {className:'inp', type:'number', step:'0.01', style:{width:'110px',fontSize:'12px'}, value:w.balance, placeholder:'Balance'});
+      const noteInp = el('input', {className:'inp', style:{flex:'1',fontSize:'12px'}, placeholder:'Note (optional)'});
+
+      nameInp.onchange = () => { allWallets[i].name = nameInp.value; };
+      balInp.onchange  = () => { allWallets[i].newBalance = parseFloat(balInp.value)||0; };
+      noteInp.onchange = () => { allWallets[i].note = noteInp.value; };
+
+      row.append(nameInp, balInp, noteInp);
+      walletList.append(row);
+    });
+
+    // Add new wallet button
+    const addRow = el('div', {style:{display:'flex',gap:'8px',marginTop:'8px'}});
+    const newName = el('input', {className:'inp', style:{flex:'1',fontSize:'12px'}, placeholder:'New wallet name'});
+    const newBal  = el('input', {className:'inp', type:'number', step:'0.01', style:{width:'110px',fontSize:'12px'}, placeholder:'Balance'});
+    const addBtn  = el('button', {className:'btn btn-gh btn-sm', onclick:()=>{
+      const n = newName.value.trim();
+      const b = parseFloat(newBal.value)||0;
+      if (!n) return;
+      wallets.push({name:n, balance:b, newBalance:b});
+      renderWalletList();
+    }}, '+ ADD');
+    addRow.append(newName, newBal, addBtn);
+    walletList.append(addRow);
+  }
+
+  renderWalletList();
+  modal.append(walletList);
+
+  const btnRow = el('div', {className:'form-row'});
+  const cancel = el('button', {className:'btn btn-o', style:{flex:'1'}, onclick:()=>overlay.remove()}, 'CANCEL');
+  const save   = el('button', {className:'btn btn-g glow-g', style:{flex:'2'}}, 'SAVE ALL');
+
+  save.onclick = async () => {
+    save.disabled = true;
+    save.textContent = 'Saving...';
+    const allWallets = wallets;
+    for (const w of allWallets) {
+      const newBal = w.newBalance !== undefined ? w.newBalance : w.balance;
+      try {
+        await api('PATCH', '/groups/admin/wallet', {
+          userId, walletName: w.name, balance: newBal, note: w.note||''
+        });
+      } catch(e) { toast('Error', e.message); }
+    }
+    overlay.remove();
+    toast('Saved', `Wallets updated for ${displayName}`);
+    renderPage();
+  };
+
+  btnRow.append(cancel, save);
+  modal.append(btnRow);
+  overlay.append(modal);
+  document.body.append(overlay);
+}
+
 // ─── GROUPS PAGE ──────────────────────────────────────────────────────────────
 function renderGroupsPage(container) {
   const col = el('div', {className:'flex-col', style:{gap:'20px'}});
@@ -1400,6 +1543,10 @@ function renderGroupsPage(container) {
     col.append(buildNoGroupCard());
   } else {
     col.append(buildFundCard(), buildDepositActions(), buildPaymentDetailsCard(), buildGroupInfoCard());
+    // Admin panel — only visible to admin
+    if (STATE.group.admin_id === STATE.user.id) {
+      col.append(buildAdminPanel());
+    }
   }
   container.append(col);
 }
