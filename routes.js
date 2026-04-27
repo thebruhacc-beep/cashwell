@@ -421,6 +421,23 @@ router.get('/groups/member/:userId/stats', requireAuth, (req, res) => {
   res.json({ stats, wallets, categories: catsByPeriod, totalDeposited: +totalDeposited.toFixed(2), txCount: txns.length });
 });
 
+// ─── ADMIN: update confirmed deposit amount ───────────────────────────────────
+router.patch('/deposits/:id/amount', requireAuth, (req, res) => {
+  const gid = userGroupId(req.user.id);
+  if (!gid) return res.status(403).json({ error: 'Not in a group' });
+  const g = db.prepare('SELECT * FROM groups_table WHERE id=?').get(gid);
+  if (g.admin_id !== req.user.id) return res.status(403).json({ error: 'Admin only' });
+
+  const dep = db.prepare('SELECT * FROM deposits WHERE id=?').get(req.params.id);
+  if (!dep || dep.group_id !== gid) return res.status(404).json({ error: 'Deposit not found' });
+
+  const { amount } = req.body || {};
+  if (amount === undefined || isNaN(amount) || amount < 0) return res.status(400).json({ error: 'Invalid amount' });
+
+  db.prepare('UPDATE deposits SET amount=? WHERE id=?').run(+parseFloat(amount).toFixed(2), dep.id);
+  res.json({ ok: true, amount: +parseFloat(amount).toFixed(2) });
+});
+
 // ─── ADMIN: update member wallet balance ──────────────────────────────────────
 router.patch('/groups/admin/wallet', requireAuth, (req, res) => {
   const gid = userGroupId(req.user.id);

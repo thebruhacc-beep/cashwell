@@ -1410,129 +1410,80 @@ async function buildAdminPanel() {
   const card = el('div', {className:'card'});
   card.innerHTML = `
     <div class="section-title mb4" style="color:#f59e0b">⚡ ADMIN PANEL</div>
-    <div class="f11 mut mb16">Adjust member wallet balances and track investments</div>
-    <div id="admin-members-list"><div class="mut f12">Loading members...</div></div>
+    <div class="f11 mut mb16">Pas bevestigde stortingen aan na fees of correcties</div>
+    <div id="admin-dep-list"><div class="mut f12">Laden...</div></div>
   `;
 
-  let members = [];
-  try {
-    members = await api('GET', '/groups/admin/members');
-  } catch(e) {
-    card.querySelector('#admin-members-list').innerHTML = `<div class="mut f12">Error: ${e.message}</div>`;
+  // Get confirmed deposits per member from STATE
+  const list = card.querySelector('#admin-dep-list');
+  list.innerHTML = '';
+
+  const confirmed = STATE.deposits.filter(d => d.status === 'confirmed');
+
+  if (!confirmed.length) {
+    list.innerHTML = '<div class="mut f12">Geen bevestigde stortingen.</div>';
     return card;
   }
 
-  const list = card.querySelector('#admin-members-list');
-  list.innerHTML = '';
+  // Group by member
+  STATE.group.members.forEach(m => {
+    const deps = confirmed.filter(d => d.user_id === m.id);
+    if (!deps.length) return;
 
-  members.forEach(m => {
-    const memberBlock = el('div', {style:{marginBottom:'20px',padding:'16px',background:'rgba(255,255,255,.02)',border:'1px solid var(--bdr)',borderRadius:'12px'}});
+    const total = deps.reduce((s,d) => s + d.amount, 0);
+    const block = el('div', {style:{marginBottom:'16px',padding:'14px',background:'rgba(255,255,255,.02)',border:'1px solid var(--bdr)',borderRadius:'12px'}});
 
-    const totalBal = m.wallets.reduce((s,w)=>s+w.balance,0);
-    memberBlock.innerHTML = `
-      <div class="flex-between mb12">
-        <div class="flex-gap8">
-          <div class="avatar-circle" style="width:32px;height:32px;font-size:13px">${m.avatar||m.username[0].toUpperCase()}</div>
-          <div>
-            <div class="f13 bold">${m.display_name||m.username} ${m.id===STATE.user.id?'<span class="nb f10">YOU</span>':''}</div>
-            <div class="f10 mut">Net Worth: <span style="color:#a78bfa">$${totalBal.toFixed(2)}</span></div>
-          </div>
+    const header = el('div', {className:'flex-between mb10'});
+    header.innerHTML = `
+      <div class="flex-gap8">
+        <div class="avatar-circle" style="width:30px;height:30px;font-size:12px">${m.avatar||m.username[0].toUpperCase()}</div>
+        <div>
+          <div class="f13 bold">${m.display_name||m.username} ${m.id===STATE.user.id?'<span class="nb f10">YOU</span>':''}</div>
+          <div class="f10 mut">Totaal: <span style="color:#00ff88">$${total.toFixed(2)}</span></div>
         </div>
-        <button class="btn btn-gh btn-sm" onclick="showAdminEditModal('${m.id}','${(m.display_name||m.username).replace(/'/g,"\'")}')">EDIT WALLETS</button>
       </div>
     `;
+    block.append(header);
 
-    // Wallet rows
-    if (m.wallets.length) {
-      m.wallets.forEach(w => {
-        const wRow = el('div', {style:{display:'flex',justifyContent:'space-between',padding:'4px 0',borderBottom:'1px solid rgba(255,255,255,.04)'}});
-        wRow.innerHTML = `<span class="f11 mut">${w.name}</span><span class="f11" style="color:#00ff88;font-family:Orbitron,sans-serif">$${w.balance.toFixed(2)}</span>`;
-        memberBlock.append(wRow);
+    // Each confirmed deposit as an editable row
+    deps.forEach(dep => {
+      const row = el('div', {style:{display:'flex',gap:'8px',alignItems:'center',marginBottom:'6px',padding:'8px',background:'rgba(255,255,255,.02)',borderRadius:'8px',border:'1px solid var(--bdr)'}});
+
+      const info = el('div', {style:{flex:'1'}});
+      info.innerHTML = `<div class="f11">${dep.date} · ${dep.source||'deposit'}</div><div class="f10 mut">${dep.note||''}</div>`;
+
+      const amtInp = el('input', {
+        className:'inp', type:'number', step:'0.01',
+        style:{width:'100px',fontSize:'12px'},
+        value: dep.amount
       });
-    } else {
-      memberBlock.append(html('<div class="f11 mut" style="padding:4px 0">No wallets yet</div>'));
-    }
 
-    list.append(memberBlock);
+      const saveBtn = el('button', {className:'btn btn-g btn-sm', onclick: async () => {
+        const newAmt = parseFloat(amtInp.value);
+        if (isNaN(newAmt) || newAmt < 0) return toast('Error', 'Ongeldig bedrag');
+        saveBtn.disabled = true;
+        saveBtn.textContent = '...';
+        try {
+          await api('PATCH', `/deposits/${dep.id}/amount`, { amount: newAmt });
+          dep.amount = newAmt;
+          // Update total display
+          const newTotal = deps.reduce((s,d) => s + d.amount, 0);
+          header.querySelector('.f10.mut span').textContent = '$' + newTotal.toFixed(2);
+          toast('Opgeslagen', `Storting aangepast naar $${newAmt.toFixed(2)}`);
+        } catch(e) { toast('Error', e.message); }
+        saveBtn.disabled = false;
+        saveBtn.textContent = '✓';
+        setTimeout(() => { saveBtn.textContent = 'SAVE'; }, 2000);
+      }}, 'SAVE');
+
+      row.append(info, amtInp, saveBtn);
+      block.append(row);
+    });
+
+    list.append(block);
   });
 
   return card;
-}
-
-async function showAdminEditModal(userId, displayName) {
-  const overlay = el('div', {className:'overlay', onclick:e=>{ if(e.target===overlay) overlay.remove(); }});
-  const modal   = el('div', {className:'modal slide'});
-  modal.innerHTML = `<div class="modal-title nb">EDIT WALLETS · ${displayName}</div><div class="modal-sub">Adjust balances and log investments</div>`;
-
-  // Load member wallets
-  let members = [];
-  try { members = await api('GET', '/groups/admin/members'); } catch {}
-  const member = members.find(m=>m.id===userId);
-  const wallets = member?.wallets || [];
-
-  const walletList = el('div', {style:{marginBottom:'16px'}});
-
-  function renderWalletList() {
-    walletList.innerHTML = '';
-    const allWallets = [...wallets];
-
-    allWallets.forEach((w,i) => {
-      const row = el('div', {style:{display:'flex',gap:'8px',alignItems:'center',marginBottom:'8px'}});
-      const nameInp = el('input', {className:'inp', style:{flex:'1',fontSize:'12px'}, value:w.name, placeholder:'Wallet name'});
-      const balInp  = el('input', {className:'inp', type:'number', step:'0.01', style:{width:'110px',fontSize:'12px'}, value:w.balance, placeholder:'Balance'});
-      const noteInp = el('input', {className:'inp', style:{flex:'1',fontSize:'12px'}, placeholder:'Note (optional)'});
-
-      nameInp.onchange = () => { allWallets[i].name = nameInp.value; };
-      balInp.onchange  = () => { allWallets[i].newBalance = parseFloat(balInp.value)||0; };
-      noteInp.onchange = () => { allWallets[i].note = noteInp.value; };
-
-      row.append(nameInp, balInp, noteInp);
-      walletList.append(row);
-    });
-
-    // Add new wallet button
-    const addRow = el('div', {style:{display:'flex',gap:'8px',marginTop:'8px'}});
-    const newName = el('input', {className:'inp', style:{flex:'1',fontSize:'12px'}, placeholder:'New wallet name'});
-    const newBal  = el('input', {className:'inp', type:'number', step:'0.01', style:{width:'110px',fontSize:'12px'}, placeholder:'Balance'});
-    const addBtn  = el('button', {className:'btn btn-gh btn-sm', onclick:()=>{
-      const n = newName.value.trim();
-      const b = parseFloat(newBal.value)||0;
-      if (!n) return;
-      wallets.push({name:n, balance:b, newBalance:b});
-      renderWalletList();
-    }}, '+ ADD');
-    addRow.append(newName, newBal, addBtn);
-    walletList.append(addRow);
-  }
-
-  renderWalletList();
-  modal.append(walletList);
-
-  const btnRow = el('div', {className:'form-row'});
-  const cancel = el('button', {className:'btn btn-o', style:{flex:'1'}, onclick:()=>overlay.remove()}, 'CANCEL');
-  const save   = el('button', {className:'btn btn-g glow-g', style:{flex:'2'}}, 'SAVE ALL');
-
-  save.onclick = async () => {
-    save.disabled = true;
-    save.textContent = 'Saving...';
-    const allWallets = wallets;
-    for (const w of allWallets) {
-      const newBal = w.newBalance !== undefined ? w.newBalance : w.balance;
-      try {
-        await api('PATCH', '/groups/admin/wallet', {
-          userId, walletName: w.name, balance: newBal, note: w.note||''
-        });
-      } catch(e) { toast('Error', e.message); }
-    }
-    overlay.remove();
-    toast('Saved', `Wallets updated for ${displayName}`);
-    renderPage();
-  };
-
-  btnRow.append(cancel, save);
-  modal.append(btnRow);
-  overlay.append(modal);
-  document.body.append(overlay);
 }
 
 // ─── GROUPS PAGE ──────────────────────────────────────────────────────────────
