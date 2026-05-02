@@ -313,6 +313,7 @@ function buildSidebar() {
     <div class="net-worth-box mb12">
       <div class="net-worth-label">NET WORTH</div>
       <div class="net-worth-value ${netWorth>=0?'ng':'nr'}">${fmt(netWorth)}</div>
+      <div style="font-size:9px;color:#475569;letter-spacing:1px;margin-top:2px">WALLET TOTAL</div>
     </div>
   `));
 
@@ -1689,12 +1690,9 @@ async function renderInsights(container) {
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({
           model:'claude-sonnet-4-20250514', max_tokens:1200,
-          messages:[{role:'user',content:'You are a personal financial coach. Analyze this data and return EXACTLY 5 insights as a JSON array. Be specific, use actual numbers, give actionable advice. Each: {"icon":"emoji","title":"short title max 5 words","detail":"2 sentences with specific numbers and concrete next steps","type":"positive|warning|tip"}. JSON only, no markdown.
-
-Data: '+JSON.stringify(summary)}]
+          messages:[{role:'user',content:'You are a personal financial coach. Return EXACTLY 5 insights as JSON array. Each object: {icon,title,detail,type} where type is positive|warning|tip. JSON only. Data: '+JSON.stringify(summary)}]
         })
       });
-      const data = await res.json();
       const text = (data.content||[]).map(c=>c.text||'').join('').replace(/```json|```/g,'').trim();
       const insights = JSON.parse(text);
       resultsDiv.innerHTML = '';
