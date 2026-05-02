@@ -47,33 +47,123 @@ function fmtPlain(n) {
   if (a >= 1e3) return `$${(a/1e3).toFixed(1)}K`;
   return `$${a.toFixed(2)}`;
 }
-const todayStr  = () => new Date().toISOString().split('T')[0];
+const todayStr  = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+};
+const localDateStr = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+// Calendar-based period boundaries
+function getWeekStart() {
+  const d = new Date();
+  const day = d.getDay(); // 0=sun,1=mon,...
+  const diff = (day === 0) ? 6 : day - 1; // Monday = start
+  d.setDate(d.getDate() - diff);
+  return localDateStr(d);
+}
+function getWeekEnd() {
+  const d = new Date();
+  const day = d.getDay();
+  const diff = (day === 0) ? 0 : 7 - day; // Sunday = end
+  d.setDate(d.getDate() + diff);
+  return localDateStr(d);
+}
+function getMonthStart() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-01`;
+}
+function getMonthEnd() {
+  const d = new Date(new Date().getFullYear(), new Date().getMonth()+1, 0);
+  return localDateStr(d);
+}
+function getYearStart() { return `${new Date().getFullYear()}-01-01`; }
+function getYearEnd()   { return `${new Date().getFullYear()}-12-31`; }
+
 const cutoffMap = {
   day:   () => todayStr(),
-  week:  () => { const d=new Date(); d.setDate(d.getDate()-7);         return d.toISOString().split('T')[0]; },
-  month: () => { const d=new Date(); d.setMonth(d.getMonth()-1);       return d.toISOString().split('T')[0]; },
-  year:  () => { const d=new Date(); d.setFullYear(d.getFullYear()-1); return d.toISOString().split('T')[0]; },
+  week:  () => getWeekStart(),
+  month: () => getMonthStart(),
+  year:  () => getYearStart(),
   total: () => '0000-00-00',
 };
 
 function uid() { return Math.random().toString(36).slice(2,10); }
 
+// Robust date parser — always returns YYYY-MM-DD or null
+function parseDate(raw) {
+  if (!raw) return null;
+  // Already a JS Date object (SheetJS cellDates:true)
+  if (raw instanceof Date) {
+    if (isNaN(raw)) return null;
+    // Use UTC to avoid timezone shifts
+    const y = raw.getUTCFullYear();
+    const m = String(raw.getUTCMonth()+1).padStart(2,'0');
+    const d = String(raw.getUTCDate()).padStart(2,'0');
+    return `${y}-${m}-${d}`;
+  }
+  const s = String(raw).trim();
+  // YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  // DD/MM/YYYY — European format, auto-detect by checking which part > 12
+  if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(s)) {
+    const parts = s.split('/');
+    let day, mon;
+    const a = parseInt(parts[0]), b = parseInt(parts[1]);
+    const y = parts[2];
+    // If first number > 12, it must be the day (DD/MM)
+    // If second number > 12, it must be the day (MM/DD) — swap
+    // Otherwise assume DD/MM (European default)
+    if (a > 12) { day = parts[0]; mon = parts[1]; }
+    else if (b > 12) { day = parts[1]; mon = parts[0]; }
+    else { day = parts[0]; mon = parts[1]; } // assume DD/MM
+    day = day.padStart(2,'0'); mon = mon.padStart(2,'0');
+    if (parseInt(mon) < 1 || parseInt(mon) > 12) return null;
+    if (parseInt(day) < 1 || parseInt(day) > 31) return null;
+    return `${y}-${mon}-${day}`;
+  }
+  // DD-MM-YYYY
+  if (/^\d{1,2}-\d{1,2}-\d{4}$/.test(s)) {
+    const [d,m,y] = s.split('-');
+    const day = d.padStart(2,'0'), mon = m.padStart(2,'0');
+    if (parseInt(mon) < 1 || parseInt(mon) > 12) return null;
+    return `${y}-${mon}-${day}`;
+  }
+  // Excel serial number (number as string e.g. "45678")
+  if (/^\d{4,5}$/.test(s)) {
+    const serial = parseInt(s);
+    const d = new Date(Date.UTC(1899,11,30) + serial*86400000);
+    if (isNaN(d)) return null;
+    const y = d.getUTCFullYear();
+    const m = String(d.getUTCMonth()+1).padStart(2,'0');
+    const dd = String(d.getUTCDate()).padStart(2,'0');
+    return `${y}-${m}-${dd}`;
+  }
+  // Try native parse as last resort
+  const d = new Date(s);
+  return isNaN(d) ? null : d.toISOString().split('T')[0];
+}
+
 function filterByPeriod(txns, period) {
-  if (period === 'day')   return txns.filter(t => t.date === todayStr());
-  if (period === 'total') return txns;
-  return txns.filter(t => t.date >= cutoffMap[period]());
+  const valid = txns.filter(t => t.date && /^\d{4}-\d{2}-\d{2}$/.test(t.date));
+  if (period === 'day')   return valid.filter(t => t.date === todayStr());
+  if (period === 'total') return valid;
+  if (period === 'week')  return valid.filter(t => t.date >= getWeekStart()  && t.date <= getWeekEnd());
+  if (period === 'month') return valid.filter(t => t.date >= getMonthStart() && t.date <= getMonthEnd());
+  if (period === 'year')  return valid.filter(t => t.date >= getYearStart()  && t.date <= getYearEnd());
+  return valid;
 }
 
 function bucketsByPeriod(txns, period) {
   const m = {};
-  txns.forEach(t => {
+  // Only bucket transactions within the current period
+  const filtered = filterByPeriod(txns, period);
+  filtered.forEach(t => {
     let k;
-    const d = new Date(t.date);
+    const d = new Date(t.date + 'T00:00:00');
     if      (period === 'day')   k = t.date;
     else if (period === 'week')  { const s=new Date(d); s.setDate(d.getDate()-d.getDay()); k=s.toISOString().split('T')[0]; }
     else if (period === 'month') k = t.date.slice(0,7);
     else if (period === 'year')  k = t.date.slice(0,4);
-    else k = 'all';
+    else k = t.date.slice(0,7);
     m[k] = (m[k]||0) + t.amount;
   });
   return m;
@@ -268,14 +358,27 @@ function renderAuth() {
 }
 
 // ─── TICKER BAR ───────────────────────────────────────────────────────────────
-let cryptoPrices = { BTC: 83420, SOL: 142, USDC: 1 };
+let cryptoPrices = { BTC: 0, SOL: 0, USDC: 1 };
+async function fetchCryptoPrices() {
+  try {
+    const res = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,solana,usd-coin&vs_currencies=usd');
+    const data = await res.json();
+    cryptoPrices.BTC  = data.bitcoin?.usd  || cryptoPrices.BTC;
+    cryptoPrices.SOL  = data.solana?.usd   || cryptoPrices.SOL;
+    cryptoPrices.USDC = data['usd-coin']?.usd || 1;
+    const t = $('ticker-inner');
+    if (t) t.innerHTML = tickerInner();
+    // Also update wallet page if open
+    const cryptoRows = document.querySelectorAll('.crypto-price-val');
+    cryptoRows.forEach(el => {
+      const sym = el.dataset.sym;
+      if (sym && cryptoPrices[sym] !== undefined) el.textContent = '$' + Number(cryptoPrices[sym]).toLocaleString();
+    });
+  } catch(e) { console.warn('Crypto fetch failed:', e); }
+}
 function startTicker() {
-  setInterval(() => {
-    cryptoPrices.BTC  = +(cryptoPrices.BTC  * (1+(Math.random()-.498)*.002)).toFixed(0);
-    cryptoPrices.SOL  = +(cryptoPrices.SOL  * (1+(Math.random()-.498)*.003)).toFixed(2);
-    const el = $('ticker-inner');
-    if (el) el.innerHTML = tickerInner();
-  }, 3000);
+  fetchCryptoPrices();
+  setInterval(fetchCryptoPrices, 60000);
 }
 
 function tickerInner() {
@@ -296,7 +399,8 @@ function tickerInner() {
 function buildSidebar() {
   const pendingCount = STATE.deposits.filter(d => d.status==='pending' && STATE.group?.admin_id===STATE.user?.id).length;
   const walletTotal  = STATE.wallet.reduce((s,w) => s+w.balance, 0);
-  const netWorth     = walletTotal;
+  const txTotal      = STATE.transactions.reduce((s,t) => s+t.amount, 0);
+  const netWorth     = walletTotal + txTotal;
 
   const sb = el('div', {className:'sidebar'});
 
@@ -313,7 +417,6 @@ function buildSidebar() {
     <div class="net-worth-box mb12">
       <div class="net-worth-label">NET WORTH</div>
       <div class="net-worth-value ${netWorth>=0?'ng':'nr'}">${fmt(netWorth)}</div>
-      <div style="font-size:9px;color:#475569;letter-spacing:1px;margin-top:2px">WALLET TOTAL</div>
     </div>
   `));
 
@@ -407,14 +510,23 @@ function renderApp() {
 function renderPage() {
   const pageDiv = $('page-content');
   if (!pageDiv) return;
+  // Destroy ALL chart instances before wiping DOM to prevent canvas reuse glitch
+  Object.keys(STATE.charts).forEach(k => {
+    try { STATE.charts[k].destroy(); } catch {}
+    delete STATE.charts[k];
+  });
+  txPage = 0;
   pageDiv.innerHTML = '';
 
   // Page header
   const header = el('div', {className:'page-header'});
   const title  = NAV_ITEMS.find(n => n.id===STATE.page)?.label || 'Dashboard';
   const left   = html(`<div><div class="page-title">${title}</div><div class="page-date">${new Date().toLocaleDateString('en-US',{weekday:'long',year:'numeric',month:'long',day:'numeric'})}</div></div>`);
-  const addBtn = el('button', {className:'btn btn-g glow-g', onclick: showAddTxModal}, '+ ADD ENTRY');
-  header.append(left, addBtn);
+  const addBtn    = el('button', {className:'btn btn-g glow-g', onclick: showAddTxModal}, '+ ADD ENTRY');
+  const importBtn = el('button', {className:'btn btn-gh', style:{marginRight:'8px'}, onclick: showImportModal}, '⬆ IMPORT');
+  const btnGroup  = el('div', {className:'flex-gap8'});
+  btnGroup.append(importBtn, addBtn);
+  header.append(left, btnGroup);
   pageDiv.append(header);
 
   // Render correct page
@@ -438,11 +550,18 @@ let currentPeriod = 'day';
 function renderDashboard(container) {
   const col = el('div', {className:'flex-col', style:{gap:'20px'}});
 
-  col.append(buildPeriodStats());
-  const row = el('div', {className:'g2'});
-  row.append(buildIncomeChartCard(), buildWalletCard());
-  col.append(row);
-  col.append(buildHeatmap(), buildTxList());
+  // 1. Period tabs + grote stat kaart + records
+  try { col.append(buildPeriodStats()); } catch(e) { console.error('PeriodStats error',e); }
+
+  // 2. Chart (vol breedte, reageert op currentPeriod)
+  try { col.append(buildIncomeChartCard()); } catch(e) { console.error('IncomeChart error',e); }
+
+  // 3. Wallet kaart (vol breedte)
+  try { col.append(buildWalletCard()); } catch(e) { console.error('WalletCard error',e); }
+
+  // 4. Heatmap + entries lijst
+  try { col.append(buildHeatmap()); } catch(e) { console.error('Heatmap error',e); }
+  try { col.append(buildTxList()); } catch(e) { console.error('TxList error',e); }
 
   container.append(col);
 }
@@ -456,7 +575,7 @@ function buildPeriodStats() {
   PERIODS.forEach(p => {
     const b = el('button', {
       className: `ptab ${currentPeriod===p?'active':''}`,
-      onclick: () => { currentPeriod=p; const pw=$('period-stats-wrap'); if(pw){pw.replaceWith(buildPeriodStatsInner());} tabs.querySelectorAll('.ptab').forEach(x=>x.classList.remove('active')); b.classList.add('active'); }
+      onclick: () => { currentPeriod=p; renderPage(); }
     }, PLABEL[p]);
     tabs.append(b);
   });
@@ -474,12 +593,31 @@ function buildPeriodStatsInner() {
   const profits = txns.filter(t=>t.amount>0).reduce((s,t)=>s+t.amount,0);
   const losses  = txns.filter(t=>t.amount<0).reduce((s,t)=>s+t.amount,0);
 
-  // Records
+  // Records — beste/slechtste dag/week/maand/jaar ooit (over ALLE transacties)
+  // Groepeer alle transacties per bucket type, zonder periode filter
+  function allTimeBuckets(period) {
+    const m = {};
+    const valid = STATE.transactions.filter(t => t.date && /^\d{4}-\d{2}-\d{2}$/.test(t.date));
+    valid.forEach(t => {
+      let k;
+      if      (period === 'day')   k = t.date;
+      else if (period === 'week')  { const d=new Date(t.date+'T12:00:00'); const s=new Date(d); s.setDate(d.getDate()-d.getDay()); k=localDateStr(s); }
+      else if (period === 'month') k = t.date.slice(0,7);
+      else if (period === 'year')  k = t.date.slice(0,4);
+      else                         k = t.date.slice(0,7);
+      m[k] = (m[k]||0) + t.amount;
+    });
+    return m;
+  }
+
   const recs = {};
   PERIODS.forEach(p => {
-    const b = bucketsByPeriod(STATE.transactions, p);
-    const v = Object.values(b);
-    recs[p] = { best: v.length?Math.max(...v):0, worst: v.length?Math.min(...v):0 };
+    const b = allTimeBuckets(p);
+    const v = Object.values(b).filter(x => x !== 0);
+    recs[p] = {
+      best:  v.length ? Math.max(...v) : null,
+      worst: v.length ? Math.min(...v) : null
+    };
   });
   const cr = recs[currentPeriod];
 
@@ -501,9 +639,9 @@ function buildPeriodStatsInner() {
   // Records
   const recsRow = el('div', {className:'g2'});
   const bestCard = el('div', {className:'record-bar best'});
-  bestCard.innerHTML = `<div><div class="record-label">BEST ${PLABEL[currentPeriod]}</div><div class="record-value ny">${cr.best>0?fmt(cr.best):'—'}</div></div><span style="font-size:24px">🏆</span>`;
+  bestCard.innerHTML = `<div><div class="record-label">BEST ${PLABEL[currentPeriod]}</div><div class="record-value ny">${cr.best!==null?fmt(cr.best):'—'}</div></div><span style="font-size:24px">🏆</span>`;
   const worstCard = el('div', {className:'record-bar worst'});
-  worstCard.innerHTML = `<div><div class="record-label">WORST ${PLABEL[currentPeriod]}</div><div class="record-value nr">${cr.worst<0?fmt(cr.worst):'—'}</div></div><span style="font-size:24px">📉</span>`;
+  worstCard.innerHTML = `<div><div class="record-label">WORST ${PLABEL[currentPeriod]}</div><div class="record-value nr">${cr.worst!==null?fmt(cr.worst):'—'}</div></div><span style="font-size:24px">📉</span>`;
   recsRow.append(bestCard, worstCard);
   wrap.append(recsRow);
 
@@ -512,44 +650,99 @@ function buildPeriodStatsInner() {
 
 // ─── INCOME CHART ─────────────────────────────────────────────────────────────
 function buildIncomeChartCard() {
+  const p = currentPeriod;
+  const periodLabels = {day:'TODAY',week:'7D',month:'30D',year:'12M',total:'ALL'};
   const card = el('div', {className:'card', style:{padding:'20px 20px 14px'}});
-  card.innerHTML = '<div class="section-title mb12">INCOME OVER TIME (30D)</div>';
-  const canvas = el('canvas', {id:'income-chart', style:{width:'100%',height:'200px'}});
-  card.append(canvas);
+  card.innerHTML = `<div class="section-title mb12">INCOME OVER TIME (${periodLabels[p]||'30D'})</div>`;
+  const chartWrap = el('div', {style:{position:'relative',height:'200px',width:'100%'}});
+  const canvas = el('canvas', {id:'income-chart'});
+  chartWrap.append(canvas);
+  card.append(chartWrap);
 
   setTimeout(() => {
-    const existing = STATE.charts['income-chart'];
-    if (existing) existing.destroy();
+    try {
+      const cvs = $('income-chart');
+      if (!cvs) return;
 
-    const map = {};
-    const last30 = [...Array(30)].map((_,i)=>{ const d=new Date(); d.setDate(d.getDate()-(29-i)); return d.toISOString().split('T')[0]; });
-    last30.forEach(d=>{ map[d]=0; });
-    STATE.transactions.forEach(t=>{ if(map[t.date]!==undefined) map[t.date]+=t.amount; });
+      const now = new Date();
+      const txns = STATE.transactions;
+      let labels = [], dailyData = [], cumData = [];
 
-    let cum = 0;
-    const cumData = last30.map(d=>{ cum+=map[d]; return +cum.toFixed(2); });
-    const dailyData = last30.map(d => +map[d].toFixed(2));
-    const labels = last30.map(d=>d.slice(5));
+      if (p === 'day') {
+        // 24 hours, put all today's transactions at their hour (no hour stored, use noon)
+        const todayKey = now.toISOString().split('T')[0];
+        const todayTotal = txns.filter(t=>t.date===todayKey).reduce((s,t)=>s+t.amount,0);
+        labels = [...Array(24)].map((_,i)=>String(i).padStart(2,'0')+':00');
+        dailyData = Array(24).fill(0);
+        dailyData[12] = +todayTotal.toFixed(2);
+        let c=0; cumData = dailyData.map(v=>{c+=v;return +c.toFixed(2);});
 
-    const ctx = $('income-chart').getContext('2d');
-    STATE.charts['income-chart'] = new Chart(ctx, {
-      type: 'line',
-      data: {
-        labels,
-        datasets: [
-          { label:'Cumulative', data:cumData,  borderColor:'#00ff88', borderWidth:2, pointRadius:0, tension:.4, fill:false },
-          { label:'Daily',      data:dailyData, borderColor:'#00d4ff', borderWidth:1.5, borderDash:[4,2], pointRadius:0, tension:.4, fill:false },
-        ]
-      },
-      options: {
-        responsive:true, maintainAspectRatio:false,
-        plugins:{ legend:{ labels:{ color:'#64748b', font:{family:'Space Mono'}, boxWidth:12 } } },
-        scales:{
-          x:{ ticks:{ color:'#64748b', maxRotation:0 }, grid:{ color:'rgba(255,255,255,.04)' } },
-          y:{ ticks:{ color:'#64748b', callback:v=>`$${v}` }, grid:{ color:'rgba(255,255,255,.04)' } }
-        }
+      } else if (p === 'week') {
+        // Monday to Sunday of current week
+        const weekStart = new Date(getWeekStart()+'T12:00:00');
+        const days = [...Array(7)].map((_,i)=>{ const d=new Date(weekStart); d.setDate(weekStart.getDate()+i); return localDateStr(d); });
+        const map = {}; days.forEach(d=>{map[d]=0;});
+        txns.forEach(t=>{ if(map[t.date]!==undefined) map[t.date]+=t.amount; });
+        labels = days.map(d=>new Date(d+'T12:00:00').toLocaleDateString('en',{weekday:'short'}));
+        dailyData = days.map(d=>+(map[d]||0).toFixed(2));
+        let c=0; cumData = dailyData.map(v=>{c+=v;return +c.toFixed(2);});
+
+      } else if (p === 'month') {
+        // 1st to last day of current month
+        const now2 = new Date();
+        const daysInMonth = new Date(now2.getFullYear(), now2.getMonth()+1, 0).getDate();
+        const days = [...Array(daysInMonth)].map((_,i)=>{ const d=new Date(now2.getFullYear(), now2.getMonth(), i+1); return localDateStr(d); });
+        const map = {}; days.forEach(d=>{map[d]=0;});
+        txns.forEach(t=>{ if(map[t.date]!==undefined) map[t.date]+=t.amount; });
+        labels = days.map(d=>d.slice(5));
+        dailyData = days.map(d=>+(map[d]||0).toFixed(2));
+        let c=0; cumData = dailyData.map(v=>{c+=v;return +c.toFixed(2);});
+
+      } else if (p === 'year') {
+        const months = [...Array(12)].map((_,i)=>`${now.getFullYear()}-${String(i+1).padStart(2,'0')}`);
+        const map = {}; months.forEach(m=>{map[m]=0;});
+        txns.forEach(t=>{ const mk=t.date.slice(0,7); if(map[mk]!==undefined) map[mk]+=t.amount; });
+        labels = months.map(m=>new Date(m+'-15').toLocaleDateString('en',{month:'short'}));
+        dailyData = months.map(m=>+(map[m]||0).toFixed(2));
+        let c=0; cumData = dailyData.map(v=>{c+=v;return +c.toFixed(2);});
+
+      } else {
+        // total: use all unique year-months sorted
+        const monthSet = new Set(txns.map(t=>t.date.slice(0,7)));
+        const months = [...monthSet].sort();
+        if (!months.length) { months.push(now.toISOString().slice(0,7)); }
+        const map = {}; months.forEach(m=>{map[m]=0;});
+        txns.forEach(t=>{ const mk=t.date.slice(0,7); if(map[mk]!==undefined) map[mk]+=t.amount; });
+        labels = months.map(m=>{ try{ return new Date(m+'-15').toLocaleDateString('en',{month:'short',year:'2-digit'}); } catch{ return m; } });
+        dailyData = months.map(m=>+(map[m]||0).toFixed(2));
+        let c=0; cumData = dailyData.map(v=>{c+=v;return +c.toFixed(2);});
       }
-    });
+
+      const ctx = cvs.getContext('2d');
+      STATE.charts['income-chart'] = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [
+            { label:'Cumulative', data:cumData,   borderColor:'#00ff88', borderWidth:2,   pointRadius:0, tension:.4, fill:false },
+            { label:'Daily',      data:dailyData, borderColor:'#00d4ff', borderWidth:1.5, borderDash:[4,2], pointRadius:0, tension:.4, fill:false },
+          ]
+        },
+        options: {
+          responsive:true, maintainAspectRatio:false,
+          animation:{ duration:200 },
+          plugins:{ legend:{ labels:{ color:'#64748b', font:{family:'Space Mono'}, boxWidth:12 } } },
+          scales:{
+            x:{ ticks:{ color:'#64748b', maxRotation:0, maxTicksLimit:12 }, grid:{ color:'rgba(255,255,255,.04)' } },
+            y:{ ticks:{ color:'#64748b', callback:v=>`$${v}` }, grid:{ color:'rgba(255,255,255,.04)' } }
+          }
+        }
+      });
+    } catch(e) {
+      console.error('Chart render error:', e);
+      const wrap = $('income-chart')?.parentElement;
+      if (wrap) wrap.innerHTML = '<div class="mut f12" style="padding:20px;text-align:center">Chart unavailable</div>';
+    }
   }, 50);
 
   return card;
@@ -610,24 +803,26 @@ function renderWalletBody(container, editing) {
     chartWrap.append(canvas);
     container.append(chartWrap);
 
+    const pieData = STATE.wallet.filter(w=>w.balance>0);
     setTimeout(() => {
       const ex = STATE.charts['wallet-pie']; if(ex) ex.destroy();
-      const data = STATE.wallet.filter(w=>w.balance>0);
       const ctx  = $('wallet-pie')?.getContext('2d');
       if (!ctx) return;
       STATE.charts['wallet-pie'] = new Chart(ctx, {
         type:'doughnut',
-        data:{ labels:data.map(w=>w.name), datasets:[{ data:data.map(w=>w.balance), backgroundColor:data.map((_,i)=>SLICE_COLORS[i%SLICE_COLORS.length]), borderWidth:0 }] },
+        data:{ labels:pieData.map(w=>w.name), datasets:[{ data:pieData.map(w=>w.balance), backgroundColor:pieData.map((_,i)=>SLICE_COLORS[i%SLICE_COLORS.length]), borderWidth:0 }] },
         options:{ responsive:false, plugins:{ legend:{ display:false } }, cutout:'65%' }
       });
     }, 50);
 
     container.append(html(`<div style="text-align:center;font-family:Orbitron,sans-serif;font-size:22px;color:#00ff88;margin-bottom:12px">$${total.toLocaleString()}</div>`));
-    STATE.wallet.forEach((w,i) => {
+    STATE.wallet.forEach((w) => {
+      const pieIdx = pieData.findIndex(p=>p.name===w.name);
+      const color  = pieIdx>=0 ? SLICE_COLORS[pieIdx%SLICE_COLORS.length] : '#64748b';
       container.append(html(`
         <div class="flex-between" style="padding:8px 0;border-bottom:1px solid var(--bdr)">
-          <div class="flex-gap8"><div style="width:8px;height:8px;border-radius:50%;background:${SLICE_COLORS[i%SLICE_COLORS.length]}"></div><span class="f12">${w.name}</span></div>
-          <span class="f12" style="color:${SLICE_COLORS[i%SLICE_COLORS.length]}">$${w.balance.toLocaleString()}</span>
+          <div class="flex-gap8"><div style="width:8px;height:8px;border-radius:50%;background:${color}"></div><span class="f12">${w.name}</span></div>
+          <span class="f12" style="color:${color}">$${w.balance.toLocaleString()}</span>
         </div>
       `));
     });
@@ -670,7 +865,7 @@ function buildHeatmap() {
 
   const days = [...Array(84)].map((_,i)=>{
     const d=new Date(); d.setDate(d.getDate()-(83-i));
-    const key=d.toISOString().split('T')[0];
+    const key=localDateStr(d);
     return {key,val:dayMap[key]||0,label:d.getDate()};
   });
 
@@ -709,7 +904,7 @@ function buildTxList() {
   header.append(html('<div class="section-title">ENTRIES</div>'));
   const tabs = el('div', {className:'flex-gap8'});
   ['all','profit','loss'].forEach(f => {
-    const b = el('button', {className:`ptab ${txFilter===f?'active':''}`, onclick:()=>{ txFilter=f; body.replaceWith(buildTxBody()); }}, f.toUpperCase());
+    const b = el('button', {className:`ptab ${txFilter===f?'active':''}`, onclick:()=>{ txFilter=f; txPage=0; body.replaceWith(buildTxBody()); }}, f.toUpperCase());
     tabs.append(b);
   });
   header.append(tabs);
@@ -720,6 +915,9 @@ function buildTxList() {
   return card;
 }
 
+let txPage = 0;
+const TX_PAGE_SIZE = 50;
+
 function buildTxBody() {
   const wrap   = el('div', {id:'tx-body', style:{maxHeight:'340px',overflowY:'auto'}, className:'sh'});
   const sorted = [...STATE.transactions].sort((a,b)=>b.date.localeCompare(a.date)||(b.created_at||'').localeCompare(a.created_at||''));
@@ -727,7 +925,10 @@ function buildTxBody() {
 
   if (!items.length) { wrap.append(html('<div class="text-center mut f13" style="padding:30px">No entries yet.</div>')); return wrap; }
 
-  items.forEach(t => {
+  const start = txPage * TX_PAGE_SIZE;
+  const page  = items.slice(start, start + TX_PAGE_SIZE);
+
+  page.forEach(t => {
     const row = el('div', {className:'list-row', style:{border:'1px solid var(--bdr)',marginBottom:'6px'}});
     const icon = el('div', {className:`icon-box ${t.amount>=0?'green':'red'}`}, t.amount>=0?'▲':'▼');
     const info = el('div', {style:{flex:'1'}});
@@ -741,7 +942,194 @@ function buildTxBody() {
     row.append(icon, info, amt, del);
     wrap.append(row);
   });
+
+  // Pagination controls
+  if (items.length > TX_PAGE_SIZE) {
+    const nav = el('div', {className:'flex-between', style:{padding:'10px 0 4px',borderTop:'1px solid var(--bdr)',marginTop:'6px'}});
+    const info = el('span', {className:'f11 mut'}, `${start+1}–${Math.min(start+TX_PAGE_SIZE, items.length)} of ${items.length}`);
+    const btns = el('div', {className:'flex-gap8'});
+    if (txPage > 0) {
+      const prev = el('button', {className:'btn btn-gh btn-sm', onclick:()=>{ txPage--; wrap.replaceWith(buildTxBody()); }}, '← PREV');
+      btns.append(prev);
+    }
+    if (start + TX_PAGE_SIZE < items.length) {
+      const next = el('button', {className:'btn btn-gh btn-sm', onclick:()=>{ txPage++; wrap.replaceWith(buildTxBody()); }}, 'NEXT →');
+      btns.append(next);
+    }
+    nav.append(info, btns);
+    wrap.append(nav);
+  }
+
   return wrap;
+}
+
+
+// ─── IMPORT EXCEL MODAL ───────────────────────────────────────────────────────
+function showImportModal() {
+  // Load SheetJS if not already loaded
+  if (!window.XLSX) {
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
+    s.onload = () => _openImportModal();
+    document.head.append(s);
+  } else {
+    _openImportModal();
+  }
+}
+
+function _openImportModal() {
+  const overlay = el('div', {className:'overlay', onclick:e=>{ if(e.target===overlay) overlay.remove(); }});
+  const modal   = el('div', {className:'modal slide'});
+  modal.innerHTML = `<div class="modal-title nb">IMPORT ENTRIES</div><div class="modal-sub">Upload an Excel or CSV file with columns: Datum, Bedrag, Type</div>`;
+
+  const fileInp = el('input', {type:'file', accept:'.xlsx,.xls,.csv', className:'inp', style:{marginBottom:'12px',padding:'10px'}});
+  const preview = el('div', {id:'import-preview', style:{maxHeight:'200px',overflowY:'auto',marginBottom:'12px'}});
+  modal.append(fileInp, preview);
+
+  let parsedRows = [];
+
+  fileInp.onchange = () => {
+    const file = fileInp.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = e => {
+      const wb   = XLSX.read(e.target.result, {type:'binary'});
+      const ws   = wb.Sheets[wb.SheetNames[0]];
+
+      // Converteer Excel serienummer naar YYYY-MM-DD zonder Date objecten
+      // zodat timezone nooit een rol speelt
+      function excelSerialToDate(serial) {
+        // Excel epoch: 1 jan 1900 = dag 1 (met de bekende leap year bug)
+        const days = Math.floor(serial) - (serial >= 60 ? 2 : 1);
+        let y = 1900, d = days;
+        while (true) {
+          const leap = (y%4===0&&y%100!==0)||y%400===0;
+          const diy = leap ? 366 : 365;
+          if (d < diy) break;
+          d -= diy; y++;
+        }
+        const months = [31,((y%4===0&&y%100!==0)||y%400===0)?29:28,31,30,31,30,31,31,30,31,30,31];
+        let m = 0;
+        while (d >= months[m]) { d -= months[m]; m++; }
+        return `${y}-${String(m+1).padStart(2,'0')}-${String(d+1).padStart(2,'0')}`;
+      }
+
+      // Haal de raw cel waarden op (niet geformatteerde strings)
+      const headers = {};
+      const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
+      for (let c = range.s.c; c <= range.e.c; c++) {
+        const cell = ws[XLSX.utils.encode_cell({r: range.s.r, c})];
+        if (cell) headers[c] = String(cell.v).trim();
+      }
+
+      // Verwerk rijen
+      parsedRows = [];
+      for (let row = range.s.r + 1; row <= range.e.r; row++) {
+        const r = {};
+        for (let c = range.s.c; c <= range.e.c; c++) {
+          const cell = ws[XLSX.utils.encode_cell({r: row, c})];
+          const hdr  = headers[c];
+          if (hdr && cell) r[hdr] = cell;
+        }
+
+        const datCell = r['Datum'] || r['Date'] || r['datum'] || r['date'];
+        const amtCell = r['Bedrag'] || r['Amount'] || r['bedrag'] || r['amount'];
+        const typCell = r['Type'] || r['Category'] || r['type'] || r['category'];
+        const walCell = r['Wallet'] || r['wallet'];
+        const notCell = r['Note'] || r['Notitie'] || r['note'];
+
+        if (!datCell || !amtCell) continue;
+
+        // Datum: als het een nummer is = Excel serienummer, anders tekst parsen
+        let date;
+        if (datCell.t === 'n') {
+          date = excelSerialToDate(datCell.v);
+        } else {
+          date = parseDate(String(datCell.v).trim());
+        }
+        if (!date) continue;
+
+        const rawAmt = String(amtCell.v || '').replace(',','.');
+        const amount = parseFloat(rawAmt) || 0;
+        if (amount === 0) continue;
+
+        parsedRows.push({
+          date,
+          amount,
+          category: typCell ? String(typCell.v).trim() : 'Other',
+          wallet:   walCell ? String(walCell.v).trim() : (STATE.wallet[0]?.name || 'Cash'),
+          note:     notCell ? String(notCell.v).trim() : '',
+        });
+      }
+
+      preview.innerHTML = '';
+      if (!parsedRows.length) {
+        preview.innerHTML = '<div class="f12 mut" style="padding:10px">No valid rows found. Check column names: Datum, Bedrag, Type</div>';
+        return;
+      }
+      const skipped = rows.length - parsedRows.length;
+      const info = el('div', {className:'f11 mut', style:{marginBottom:'6px'}});
+      info.textContent = `${parsedRows.length} rijen gevonden${skipped ? ` (${skipped} overgeslagen — ongeldige datum of bedrag 0)` : ''}`;
+      preview.append(info);
+      const table = el('table', {style:{width:'100%',borderCollapse:'collapse',fontSize:'11px'}});
+      table.innerHTML = '<tr style="color:#64748b"><th style="text-align:left;padding:4px">Datum (geparsed)</th><th style="text-align:left;padding:4px">Bedrag</th><th style="text-align:left;padding:4px">Type</th></tr>';
+      parsedRows.slice(0,20).forEach(r => {
+        const tr = el('tr', {style:{borderBottom:'1px solid var(--bdr)'}});
+        tr.innerHTML = `<td style="padding:4px">${r.date}</td><td style="padding:4px;color:${r.amount>=0?'#00ff88':'#ff3366'}">${r.amount>=0?'+':''}${r.amount}</td><td style="padding:4px">${r.category}</td>`;
+        table.append(tr);
+      });
+      if (parsedRows.length > 20) table.append(el('tr', {}, el('td', {colspan:'3', style:{padding:'4px',color:'#64748b'}}, `...en nog ${parsedRows.length-20} meer rijen`)));
+      preview.append(table);
+    };
+    reader.readAsBinaryString(file);
+  };
+
+  const btnRow = el('div', {className:'form-row'});
+  const cancel = el('button', {className:'btn btn-o', style:{flex:'1'}, onclick:()=>overlay.remove()}, 'CANCEL');
+  const submit = el('button', {className:'btn btn-g', style:{flex:'2'}}, 'IMPORT ALL');
+
+  submit.onclick = async () => {
+    if (!parsedRows.length) return toast('Error', 'No rows to import');
+    submit.disabled = true;
+    submit.textContent = `Importing 0/${parsedRows.length}...`;
+    let done = 0, errors = 0;
+
+    // Add unknown categories first
+    const knownCats = new Set(STATE.categories);
+    const newCats   = [...new Set(parsedRows.map(r=>r.category))].filter(c=>!knownCats.has(c));
+    for (const c of newCats) {
+      try { await api('POST', '/categories', {name:c}); STATE.categories.push(c); } catch {}
+    }
+
+    // Add unknown wallets
+    const knownWals = new Set(STATE.wallet.map(w=>w.name));
+    const newWals   = [...new Set(parsedRows.map(r=>r.wallet))].filter(w=>!knownWals.has(w));
+    for (const w of newWals) {
+      try { await api('POST', '/wallet', {name:w}); STATE.wallet.push({name:w,balance:0}); } catch {}
+    }
+
+    const batchSize = 10;
+    for (let i = 0; i < parsedRows.length; i++) {
+      try {
+        const tx = await api('POST', '/transactions', parsedRows[i]);
+        STATE.transactions.unshift(tx);
+        done++;
+        if (done % batchSize === 0) submit.textContent = `Importing ${done}/${parsedRows.length}...`;
+      } catch { errors++; }
+    }
+
+    overlay.remove();
+    toast('Import Done', `${done} entries imported${errors?`, ${errors} failed`:''}`);
+    await loadAll();
+    STATE.page = 'dashboard';
+    currentPeriod = 'total';
+    renderPage();
+  };
+
+  btnRow.append(cancel, submit);
+  modal.append(btnRow);
+  overlay.append(modal);
+  document.body.append(overlay);
 }
 
 // ─── ADD TRANSACTION MODAL ────────────────────────────────────────────────────
@@ -810,8 +1198,10 @@ function renderCharts(container) {
 function buildCategoryChart() {
   const card = el('div', {className:'card', style:{padding:'20px 20px 14px'}});
   card.innerHTML = '<div class="section-title mb12">BY CATEGORY</div>';
-  const canvas = el('canvas', {id:'cat-chart', style:{width:'100%',height:'200px'}});
-  card.append(canvas);
+  const chartWrap2 = el('div', {style:{position:'relative',height:'200px',width:'100%'}});
+  const canvas = el('canvas', {id:'cat-chart'});
+  chartWrap2.append(canvas);
+  card.append(chartWrap2);
 
   setTimeout(() => {
     const ex = STATE.charts['cat-chart']; if(ex) ex.destroy();
@@ -843,21 +1233,257 @@ function renderWalletPage(container) {
     {sym:'SOL',name:'Solana',   price:cryptoPrices.SOL},
     {sym:'USDC',name:'USD Coin',price:cryptoPrices.USDC},
   ].forEach(c => {
-    cryptoCard.append(html(`
+    const row = html(`
       <div class="flex-between" style="padding:14px 0;border-bottom:1px solid var(--bdr)">
         <div class="flex-gap8">
           <div style="width:40px;height:40px;border-radius:50%;background:rgba(0,212,255,.1);border:1px solid rgba(0,212,255,.2);display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700">${c.sym[0]}</div>
           <div><div class="bold">${c.name}</div><div class="f11 mut">${c.sym}</div></div>
         </div>
         <div style="text-align:right">
-          <div style="font-family:Orbitron,sans-serif;font-size:16px;color:#00ff88">$${Number(c.price).toLocaleString()}</div>
+          <div class="crypto-price-val" data-sym="${c.sym}" style="font-family:Orbitron,sans-serif;font-size:16px;color:#00ff88">${c.price>0?'$'+Number(c.price).toLocaleString():'Loading...'}</div>
           <div class="pulse f11 mut">LIVE</div>
         </div>
       </div>
-    `));
+    `);
+    cryptoCard.append(row);
   });
   col.append(cryptoCard);
   container.append(col);
+  // Refresh prices immediately when wallet page is opened
+  fetchCryptoPrices();
+}
+
+
+// ─── MEMBER PROFILE MODAL ─────────────────────────────────────────────────────
+const PERIOD_LABELS2 = {day:'Today',week:'This Week',month:'This Month',year:'This Year',total:'All Time'};
+const PERIODS2 = ['day','week','month','year','total'];
+const SLICE_COLORS2 = ['#00ff88','#00d4ff','#a78bfa','#f59e0b','#ff3366','#10b981'];
+
+async function showMemberProfile(member) {
+  const overlay = el('div', {className:'overlay', onclick:e=>{ if(e.target===overlay) overlay.remove(); }});
+  const modal   = el('div', {className:'modal slide', style:{maxWidth:'520px',width:'95vw',maxHeight:'90vh',overflowY:'auto'}});
+
+  // Header
+  const hdr = el('div', {style:{display:'flex',alignItems:'center',gap:'16px',marginBottom:'24px'}});
+  const av  = el('div', {className:'avatar-circle', style:{width:'56px',height:'56px',fontSize:'22px',flexShrink:'0'}}, member.avatar||member.username[0].toUpperCase());
+  const nameBox = el('div');
+  nameBox.innerHTML = `<div style="font-family:Orbitron,sans-serif;font-size:18px;color:#00d4ff">${member.display_name||member.username}</div><div class="f12 mut">@${member.username}</div>`;
+  hdr.append(av, nameBox);
+  modal.append(hdr);
+
+  // Loading state
+  const body = el('div');
+  body.innerHTML = '<div class="mut f12 text-center" style="padding:30px">Loading stats...</div>';
+  modal.append(body);
+  overlay.append(modal);
+  document.body.append(overlay);
+
+  let data;
+  try {
+    data = await api('GET', `/groups/member/${member.id}/stats`);
+  } catch(e) {
+    body.innerHTML = `<div class="mut f12 text-center" style="padding:30px">Error: ${e.message}</div>`;
+    return;
+  }
+  if (!data) {
+    body.innerHTML = '<div class="mut f12 text-center" style="padding:30px">No data returned.</div>';
+    return;
+  }
+
+  body.innerHTML = '';
+
+  // Period selector
+  let activePeriod = 'total';
+  const tabRow = el('div', {style:{display:'flex',gap:'6px',marginBottom:'16px',flexWrap:'wrap'}});
+
+  function buildBody() {
+    body.innerHTML = '';
+    body.append(tabRow);
+
+    const s = data.stats[activePeriod];
+    const PERIOD_UNIT = {day:'DAY',week:'WEEK',month:'MONTH',year:'YEAR',total:'ALL TIME'};
+    const unit = PERIOD_UNIT[activePeriod];
+
+    // Main performance card
+    const mainCard = el('div', {style:{padding:'20px 24px',background:s.total>=0?'rgba(0,255,136,.06)':'rgba(255,51,102,.06)',border:`1px solid ${s.total>=0?'rgba(0,255,136,.2)':'rgba(255,51,102,.2)'}`,borderRadius:'12px',marginBottom:'16px'}});
+    mainCard.innerHTML = `
+      <div class="f11 mut" style="letter-spacing:2px;margin-bottom:6px">${PERIOD_LABELS2[activePeriod].toUpperCase()} PERFORMANCE</div>
+      <div style="font-family:Orbitron,sans-serif;font-size:36px;font-weight:900;color:${s.total>=0?'#00ff88':'#ff3366'}">${s.total>=0?'+':''}$${Math.abs(s.total).toFixed(2)}</div>
+      <div style="display:flex;gap:24px;margin-top:14px;flex-wrap:wrap">
+        <div><div class="f10 mut">PROFIT</div><div style="color:#00ff88;font-family:Orbitron,sans-serif;font-size:13px;margin-top:2px">+$${s.profit.toFixed(2)}</div></div>
+        <div><div class="f10 mut">LOSS</div><div style="color:#ff3366;font-family:Orbitron,sans-serif;font-size:13px;margin-top:2px">-$${Math.abs(s.loss).toFixed(2)}</div></div>
+        <div><div class="f10 mut">ENTRIES</div><div style="color:#00d4ff;font-family:Orbitron,sans-serif;font-size:13px;margin-top:2px">${s.entries}</div></div>
+      </div>
+    `;
+    body.append(mainCard);
+
+    // Best / Worst for selected period
+    const recsRow = el('div', {style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px',marginBottom:'16px'}});
+    const bestVal  = s.best  !== undefined && s.best  !== null ? '$'+Math.abs(s.best).toFixed(2)  : '—';
+    const worstVal = s.worst !== undefined && s.worst !== null ? '$'+Math.abs(s.worst).toFixed(2) : '—';
+    const bestCard2 = el('div', {className:'record-bar best'});
+    bestCard2.innerHTML = `<div><div class="record-label">BEST ${unit}</div><div class="record-value ny">${bestVal}</div></div><span style="font-size:20px">🏆</span>`;
+    const worstCard2 = el('div', {className:'record-bar worst'});
+    worstCard2.innerHTML = `<div><div class="record-label">WORST ${unit}</div><div class="record-value nr">${worstVal}</div></div><span style="font-size:20px">📉</span>`;
+    recsRow.append(bestCard2, worstCard2);
+    body.append(recsRow);
+
+    // Net worth = wallet total
+    const totalBal = data.wallets.reduce((sum,w)=>sum+w.balance,0);
+    const nwCard = el('div', {style:{padding:'14px 16px',background:'rgba(167,139,250,.06)',border:'1px solid rgba(167,139,250,.2)',borderRadius:'12px',marginBottom:'16px',display:'flex',justifyContent:'space-between',alignItems:'center'}});
+    nwCard.innerHTML = `
+      <div><div class="f10 mut" style="letter-spacing:2px;margin-bottom:4px">NET WORTH</div>
+      <div style="font-family:Orbitron,sans-serif;font-size:22px;color:#a78bfa">$${totalBal.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</div></div>
+      <div style="font-size:24px">💎</div>
+    `;
+    body.append(nwCard);
+
+    // Wallet breakdown
+    if (data.wallets.length) {
+      const walletCard = el('div', {style:{padding:'16px',background:'rgba(255,255,255,.03)',border:'1px solid var(--bdr)',borderRadius:'12px',marginBottom:'16px'}});
+      walletCard.innerHTML = '<div class="f11 mut" style="letter-spacing:2px;margin-bottom:12px">WALLETS</div>';
+      data.wallets.filter(w=>w.balance>=0).forEach((w,i) => {
+        const pct = totalBal>0 ? (w.balance/totalBal*100).toFixed(1) : 0;
+        const color = SLICE_COLORS2[i%SLICE_COLORS2.length];
+        const row2 = el('div', {style:{marginBottom:'10px'}});
+        row2.innerHTML = `
+          <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+            <div style="display:flex;align-items:center;gap:6px">
+              <div style="width:8px;height:8px;border-radius:50%;background:${color}"></div>
+              <span class="f12">${w.name}</span>
+            </div>
+            <span style="color:${color};font-family:Orbitron,sans-serif;font-size:12px">$${w.balance.toFixed(2)} <span class="f10 mut">${pct}%</span></span>
+          </div>
+          <div class="prog"><div class="prog-f" style="width:${pct}%;background:${color}"></div></div>
+        `;
+        walletCard.append(row2);
+      });
+      body.append(walletCard);
+    }
+
+    // Top categories for active period
+    const periodCats = Array.isArray(data.categories) ? data.categories : (data.categories[activePeriod] || []);
+    if (periodCats.length) {
+      const catCard = el('div', {style:{padding:'16px',background:'rgba(255,255,255,.03)',border:'1px solid var(--bdr)',borderRadius:'12px',marginBottom:'16px'}});
+      catCard.innerHTML = '<div class="f11 mut" style="letter-spacing:2px;margin-bottom:12px">TOP CATEGORIES</div>';
+      periodCats.forEach((c,i) => {
+        const color = c.amount>=0 ? SLICE_COLORS2[i%SLICE_COLORS2.length] : '#ff3366';
+        const row3  = el('div', {style:{display:'flex',justifyContent:'space-between',padding:'6px 0',borderBottom:'1px solid var(--bdr)'}});
+        row3.innerHTML = `<span class="f12">${c.name}</span><span style="color:${color};font-family:Orbitron,sans-serif;font-size:12px">${c.amount>=0?'+':''}$${Math.abs(c.amount).toFixed(2)}</span>`;
+        catCard.append(row3);
+      });
+      body.append(catCard);
+    }
+
+    // Group contribution
+    const contCard = el('div', {style:{padding:'14px 16px',background:'rgba(0,212,255,.05)',border:'1px solid rgba(0,212,255,.15)',borderRadius:'12px',display:'flex',justifyContent:'space-between',alignItems:'center'}});
+    contCard.innerHTML = `
+      <div><div class="f10 mut" style="letter-spacing:2px">GROUP FUND CONTRIBUTION</div><div style="font-family:Orbitron,sans-serif;font-size:18px;color:#00d4ff;margin-top:4px">$${data.totalDeposited.toFixed(2)}</div></div>
+      <div style="text-align:right"><div class="f10 mut">TOTAL ENTRIES</div><div style="font-family:Orbitron,sans-serif;font-size:18px;color:#a78bfa;margin-top:4px">${data.txCount}</div></div>
+    `;
+    body.append(contCard);
+  }
+
+  // Build period tabs
+  PERIODS2.forEach(p => {
+    const btn = el('button', {
+      className: `ptab ${p===activePeriod?'active':''}`,
+      onclick: () => {
+        activePeriod = p;
+        tabRow.querySelectorAll('.ptab').forEach(b=>b.classList.remove('active'));
+        btn.classList.add('active');
+        buildBody();
+      }
+    }, PERIOD_LABELS2[p].toUpperCase());
+    tabRow.append(btn);
+  });
+
+  buildBody();
+
+  // Close button
+  const closeBtn = el('button', {className:'btn btn-o mt12 btn-full', onclick:()=>overlay.remove()}, 'CLOSE');
+  modal.append(closeBtn);
+}
+
+// ─── ADMIN PANEL ─────────────────────────────────────────────────────────────
+async function buildAdminPanel() {
+  const card = el('div', {className:'card'});
+  card.innerHTML = `
+    <div class="section-title mb4" style="color:#f59e0b">⚡ ADMIN PANEL</div>
+    <div class="f11 mut mb16">Pas bevestigde stortingen aan na fees of correcties</div>
+    <div id="admin-dep-list"><div class="mut f12">Laden...</div></div>
+  `;
+
+  // Get confirmed deposits per member from STATE
+  const list = card.querySelector('#admin-dep-list');
+  list.innerHTML = '';
+
+  const confirmed = STATE.deposits.filter(d => d.status === 'confirmed');
+
+  if (!confirmed.length) {
+    list.innerHTML = '<div class="mut f12">Geen bevestigde stortingen.</div>';
+    return card;
+  }
+
+  // Group by member
+  STATE.group.members.forEach(m => {
+    const deps = confirmed.filter(d => d.user_id === m.id);
+    if (!deps.length) return;
+
+    const total = deps.reduce((s,d) => s + d.amount, 0);
+    const block = el('div', {style:{marginBottom:'16px',padding:'14px',background:'rgba(255,255,255,.02)',border:'1px solid var(--bdr)',borderRadius:'12px'}});
+
+    const header = el('div', {className:'flex-between mb10'});
+    header.innerHTML = `
+      <div class="flex-gap8">
+        <div class="avatar-circle" style="width:30px;height:30px;font-size:12px">${m.avatar||m.username[0].toUpperCase()}</div>
+        <div>
+          <div class="f13 bold">${m.display_name||m.username} ${m.id===STATE.user.id?'<span class="nb f10">YOU</span>':''}</div>
+          <div class="f10 mut">Totaal: <span style="color:#00ff88">$${total.toFixed(2)}</span></div>
+        </div>
+      </div>
+    `;
+    block.append(header);
+
+    // Each confirmed deposit as an editable row
+    deps.forEach(dep => {
+      const row = el('div', {style:{display:'flex',gap:'8px',alignItems:'center',marginBottom:'6px',padding:'8px',background:'rgba(255,255,255,.02)',borderRadius:'8px',border:'1px solid var(--bdr)'}});
+
+      const info = el('div', {style:{flex:'1'}});
+      info.innerHTML = `<div class="f11">${dep.date} · ${dep.source||'deposit'}</div><div class="f10 mut">${dep.note||''}</div>`;
+
+      const amtInp = el('input', {
+        className:'inp', type:'number', step:'0.01',
+        style:{width:'100px',fontSize:'12px'},
+        value: dep.amount
+      });
+
+      const saveBtn = el('button', {className:'btn btn-g btn-sm', onclick: async () => {
+        const newAmt = parseFloat(amtInp.value);
+        if (isNaN(newAmt) || newAmt < 0) return toast('Error', 'Ongeldig bedrag');
+        saveBtn.disabled = true;
+        saveBtn.textContent = '...';
+        try {
+          await api('PATCH', `/deposits/${dep.id}/amount`, { amount: newAmt });
+          dep.amount = newAmt;
+          // Update total display
+          const newTotal = deps.reduce((s,d) => s + d.amount, 0);
+          header.querySelector('.f10.mut span').textContent = '$' + newTotal.toFixed(2);
+          toast('Opgeslagen', `Storting aangepast naar $${newAmt.toFixed(2)}`);
+        } catch(e) { toast('Error', e.message); }
+        saveBtn.disabled = false;
+        saveBtn.textContent = '✓';
+        setTimeout(() => { saveBtn.textContent = 'SAVE'; }, 2000);
+      }}, 'SAVE');
+
+      row.append(info, amtInp, saveBtn);
+      block.append(row);
+    });
+
+    list.append(block);
+  });
+
+  return card;
 }
 
 // ─── GROUPS PAGE ──────────────────────────────────────────────────────────────
@@ -868,6 +1494,12 @@ function renderGroupsPage(container) {
     col.append(buildNoGroupCard());
   } else {
     col.append(buildFundCard(), buildDepositActions(), buildPaymentDetailsCard(), buildGroupInfoCard());
+    // Admin panel — only visible to admin
+    if (STATE.group.admin_id === STATE.user.id) {
+      const adminPlaceholder = el('div');
+      col.append(adminPlaceholder);
+      buildAdminPanel().then(card => adminPlaceholder.replaceWith(card));
+    }
   }
   container.append(col);
 }
@@ -1020,7 +1652,8 @@ function buildGroupInfoCard() {
   card.append(infoBox);
 
   STATE.group.members.forEach((m,i) => {
-    const row = el('div', {className:'list-row', style:{border:'1px solid var(--bdr)',marginBottom:'6px'}});
+    const row = el('div', {className:'list-row', style:{border:'1px solid var(--bdr)',marginBottom:'6px',cursor:'pointer'}});
+    row.onclick = () => showMemberProfile(m);
     const avatar = el('div', {className:'avatar-circle'}, m.avatar||m.username[0].toUpperCase());
     const info   = el('div', {style:{flex:'1'}});
     info.innerHTML = `<div class="f13">${m.display_name||m.username} ${m.id===STATE.user.id?'<span class="nb f11">YOU</span>':''}</div><div class="f11" style="color:#00ff88">@${m.username} · $${(memberTotals[m.id]||0).toFixed(2)}</div>`;
@@ -1374,6 +2007,8 @@ function renderChatPage(container) {
 }
 
 // ─── LEADERBOARD ──────────────────────────────────────────────────────────────
+let lbPeriod = 'month';
+
 function renderLeaderboard(container) {
   const col = el('div', {className:'flex-col', style:{gap:'20px'}});
 
@@ -1383,82 +2018,117 @@ function renderLeaderboard(container) {
     return;
   }
 
-  const confirmed = STATE.deposits.filter(d => d.status === 'confirmed');
+  const confirmed = STATE.deposits.filter(d=>d.status==='confirmed');
   const medals = ['🥇','🥈','🥉'];
   const PLBLS = {day:'TODAY',week:'THIS WEEK',month:'THIS MONTH',year:'THIS YEAR',total:'ALL TIME'};
 
-  if (typeof window._lbPeriod === 'undefined') window._lbPeriod = 'total';
-
-  // Period tabs
+  // ── Period tabs ──
   const tabsWrap = el('div', {style:{display:'flex',gap:'6px',flexWrap:'wrap'}});
   ['day','week','month','year','total'].forEach(p => {
     const b = el('button', {
-      className: `ptab ${p===window._lbPeriod?'active':''}`,
-      onclick: () => { window._lbPeriod=p; container.innerHTML=''; renderLeaderboard(container); }
+      className:`ptab ${p===lbPeriod?'active':''}`,
+      onclick:() => { lbPeriod=p; container.innerHTML=''; renderLeaderboard(container); }
     }, PLBLS[p]);
     tabsWrap.append(b);
   });
   col.append(tabsWrap);
 
-  // Group banner
-  const banner = el('div', {style:{padding:'20px 24px',background:'linear-gradient(135deg,rgba(0,212,255,.08),rgba(167,139,250,.08))',border:'1px solid rgba(0,212,255,.2)',borderRadius:'16px'}});
+  // ── Group hero banner ──
+  const banner = el('div', {style:{
+    background:'linear-gradient(135deg,rgba(0,212,255,.08),rgba(167,139,250,.08))',
+    border:'1px solid rgba(0,212,255,.2)', borderRadius:'16px', padding:'24px'
+  }});
+
+  // Calculate group total for period using all member transactions
+  // We show each member's personal profit/loss for the selected period
+  // For the banner: show group name + period label
   banner.innerHTML = `
-    <div style="display:flex;align-items:center;gap:14px">
+    <div style="display:flex;align-items:center;gap:14px;margin-bottom:6px">
       <div style="font-size:28px">◆</div>
       <div>
         <div style="font-family:Orbitron,sans-serif;font-size:20px;color:#00d4ff">${STATE.group.name}</div>
-        <div class="f11 mut" style="margin-top:2px">${STATE.group.members.length} member${STATE.group.members.length!==1?'s':''} · ${PLBLS[window._lbPeriod]} RANKINGS</div>
+        <div class="f11 mut" style="margin-top:2px">${STATE.group.members.length} member${STATE.group.members.length!==1?'s':''} · ${PLBLS[lbPeriod]} RANKINGS</div>
       </div>
     </div>
   `;
   col.append(banner);
 
-  // Member rankings sorted by fund contribution
+  // ── Member cards — sorted by fund contribution ──
   const membersCard = el('div', {className:'card'});
-  membersCard.innerHTML = '<div class="section-title mb16">MEMBER RANKINGS</div>';
+  membersCard.innerHTML = `<div class="section-title mb16">MEMBER RANKINGS</div>`;
 
+  // Sort by fund contribution (deposits)
   const sorted = [...STATE.group.members].map(m => ({
     ...m,
     contrib: confirmed.filter(d=>d.user_id===m.id).reduce((s,d)=>s+d.amount,0)
-  })).sort((a,b) => b.contrib - a.contrib);
+  })).sort((a,b)=>b.contrib-a.contrib);
 
   sorted.forEach((m,i) => {
     const isYou = m.id === STATE.user.id;
+    const medal = medals[i] || `${i+1}`;
     const color = i===0?'#f59e0b':i===1?'#94a3b8':i===2?'#b45309':'#64748b';
-    const row = el('div', {
-      style:{display:'flex',alignItems:'center',gap:'14px',padding:'14px 16px',marginBottom:'8px',
-        background:isYou?'rgba(0,212,255,.06)':'rgba(255,255,255,.02)',
-        border:`1px solid ${isYou?'rgba(0,212,255,.25)':'var(--bdr)'}`,
-        borderRadius:'12px',cursor:'pointer',transition:'all .2s'},
-      onclick: () => showMemberStatsModal(m)
-    });
-    row.onmouseenter = () => { row.style.background=isYou?'rgba(0,212,255,.1)':'rgba(255,255,255,.05)'; row.style.transform='translateX(4px)'; };
-    row.onmouseleave = () => { row.style.background=isYou?'rgba(0,212,255,.06)':'rgba(255,255,255,.02)'; row.style.transform=''; };
 
-    const badge = el('div', {style:{width:'36px',height:'36px',borderRadius:'50%',background:`${color}22`,border:`2px solid ${color}`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:i<3?'18px':'13px',fontWeight:'700',flexShrink:'0'}}, medals[i]||String(i+1));
-    const av = el('div', {className:'avatar-circle', style:{width:'40px',height:'40px',fontSize:'16px',flexShrink:'0'}}, m.avatar||m.username[0].toUpperCase());
+    const row = el('div', {
+      style:{
+        display:'flex', alignItems:'center', gap:'14px',
+        padding:'14px 16px', marginBottom:'8px',
+        background: isYou?'rgba(0,212,255,.06)':'rgba(255,255,255,.02)',
+        border:`1px solid ${isYou?'rgba(0,212,255,.25)':'var(--bdr)'}`,
+        borderRadius:'12px', cursor:'pointer', transition:'all .2s'
+      },
+      onclick: () => showMemberProfile(m)
+    });
+
+    row.onmouseenter = () => { row.style.background = isYou?'rgba(0,212,255,.1)':'rgba(255,255,255,.05)'; row.style.transform='translateX(4px)'; };
+    row.onmouseleave = () => { row.style.background = isYou?'rgba(0,212,255,.06)':'rgba(255,255,255,.02)'; row.style.transform=''; };
+
+    const rankBadge = el('div', {style:{
+      width:'36px', height:'36px', borderRadius:'50%',
+      background:`rgba(${i===0?'245,158,11':i===1?'148,163,184':i===2?'180,83,9':'100,116,139'},.15)`,
+      border:`2px solid ${color}`,
+      display:'flex', alignItems:'center', justifyContent:'center',
+      fontSize: i<3?'18px':'13px', fontWeight:'700', flexShrink:'0'
+    }}, medal);
+
+    const av = el('div', {className:'avatar-circle', style:{width:'40px',height:'40px',fontSize:'16px',flexShrink:'0'}},
+      m.avatar||m.username[0].toUpperCase());
+
     const info = el('div', {style:{flex:'1',minWidth:'0'}});
-    info.innerHTML = `<div style="display:flex;align-items:center;gap:6px"><span style="font-size:14px;font-weight:${isYou?700:400}">${m.display_name||m.username}</span>${isYou?'<span class="nb f10" style="padding:1px 6px;border-radius:4px">YOU</span>':''}</div><div class="f11 mut">@${m.username}</div>`;
+    info.innerHTML = `
+      <div style="display:flex;align-items:center;gap:6px">
+        <span style="font-size:14px;font-weight:${isYou?'700':'400'}">${m.display_name||m.username}</span>
+        ${isYou?'<span class="nb f10" style="padding:1px 6px;border-radius:4px">YOU</span>':''}
+      </div>
+      <div class="f11 mut">@${m.username}</div>
+    `;
+
     const stats = el('div', {style:{textAlign:'right',flexShrink:'0'}});
-    stats.innerHTML = `<div style="font-family:Orbitron,sans-serif;font-size:14px;color:#00ff88">$${m.contrib.toFixed(2)}</div><div class="f10 mut">fund</div>`;
-    row.append(badge, av, info, stats, el('div',{style:{color:'#64748b',fontSize:'16px'}},'›'));
+    stats.innerHTML = `
+      <div style="font-family:Orbitron,sans-serif;font-size:14px;color:#00ff88">$${m.contrib.toFixed(2)}</div>
+      <div class="f10 mut">fund</div>
+    `;
+
+    const arrow = el('div', {style:{color:'#64748b',fontSize:'12px',flexShrink:'0'}}, '›');
+
+    row.append(rankBadge, av, info, stats, arrow);
     membersCard.append(row);
   });
-  membersCard.append(html('<div class="f10 mut text-center" style="margin-top:8px;padding-top:8px;border-top:1px solid var(--bdr)">Click a member to view their stats</div>'));
+
+  membersCard.append(html(`<div class="f10 mut text-center" style="margin-top:8px;padding-top:8px;border-top:1px solid var(--bdr)">Click a member to view their full stats</div>`));
   col.append(membersCard);
 
-  // Fund contribution bars
-  const fundTotal = sorted.reduce((s,m)=>s+m.contrib,0);
-  if (fundTotal > 0) {
+  // ── Fund contribution bar chart ──
+  const totalContrib = sorted.reduce((s,m)=>s+m.contrib,0);
+  if (totalContrib > 0) {
     const fundCard = el('div', {className:'card'});
     fundCard.innerHTML = '<div class="section-title mb16">FUND CONTRIBUTIONS</div>';
     sorted.forEach((m,i) => {
-      const pct = fundTotal>0?(m.contrib/fundTotal*100):0;
+      const pct = totalContrib>0?(m.contrib/totalContrib*100):0;
       const color = SLICE_COLORS[i%SLICE_COLORS.length];
       const barRow = el('div', {style:{marginBottom:'12px'}});
       barRow.innerHTML = `
         <div style="display:flex;justify-content:space-between;margin-bottom:4px">
-          <span class="f12">${m.display_name||m.username}${m.id===STATE.user.id?' (you)':''}</span>
+          <span class="f12">${m.display_name||m.username} ${m.id===STATE.user.id?'(you)':''}</span>
           <span style="color:${color};font-family:Orbitron,sans-serif;font-size:11px">$${m.contrib.toFixed(2)} · ${pct.toFixed(1)}%</span>
         </div>
         <div class="prog"><div class="prog-f" style="width:${pct}%;background:${color};transition:width .6s ease"></div></div>
@@ -1468,253 +2138,87 @@ function renderLeaderboard(container) {
     col.append(fundCard);
   }
 
-  // Your personal stats for period
+  // ── Your personal stats for the period ──
   const myCard = el('div', {className:'card'});
-  myCard.innerHTML = `<div class="section-title mb16">YOUR ${PLBLS[window._lbPeriod]} STATS</div>`;
-  const myTxns  = filterByPeriod(STATE.transactions, window._lbPeriod);
-  const myTotal  = myTxns.reduce((s,t)=>s+t.amount,0);
+  myCard.innerHTML = `<div class="section-title mb16">YOUR ${PLBLS[lbPeriod]} STATS</div>`;
+  const myTxns = filterByPeriod(STATE.transactions, lbPeriod);
+  const myTotal = myTxns.reduce((s,t)=>s+t.amount,0);
   const myProfit = myTxns.filter(t=>t.amount>0).reduce((s,t)=>s+t.amount,0);
   const myLoss   = myTxns.filter(t=>t.amount<0).reduce((s,t)=>s+t.amount,0);
-  const myNetWorth = STATE.wallet.reduce((s,w)=>s+w.balance,0);
 
-  const statGrid = el('div', {style:{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'10px',marginBottom:'14px'}});
-  [{l:'PERFORMANCE',v:fmt(myTotal),c:myTotal>=0?'#00ff88':'#ff3366'},{l:'PROFIT',v:`+$${myProfit.toFixed(2)}`,c:'#00ff88'},{l:'LOSS',v:fmt(myLoss),c:'#ff3366'}].forEach(s=>{
-    const box=el('div',{style:{padding:'12px',background:'rgba(255,255,255,.03)',border:'1px solid var(--bdr)',borderRadius:'10px',textAlign:'center'}});
-    box.innerHTML=`<div class="f10 mut mb4">${s.l}</div><div style="font-family:Orbitron,sans-serif;font-size:14px;color:${s.c}">${s.v}</div>`;
-    statGrid.append(box);
+  const myStatRow = el('div', {style:{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'12px',marginBottom:'12px'}});
+  [
+    {label:'PERFORMANCE', val: fmt(myTotal), color: myTotal>=0?'#00ff88':'#ff3366'},
+    {label:'PROFIT',      val: `+$${myProfit.toFixed(2)}`, color:'#00ff88'},
+    {label:'LOSS',        val: fmt(myLoss), color:'#ff3366'},
+  ].forEach(s => {
+    const box = el('div', {style:{padding:'14px',background:'rgba(255,255,255,.03)',border:'1px solid var(--bdr)',borderRadius:'10px',textAlign:'center'}});
+    box.innerHTML = `<div class="f10 mut" style="margin-bottom:6px;letter-spacing:1px">${s.label}</div><div style="font-family:Orbitron,sans-serif;font-size:16px;color:${s.color}">${s.val}</div>`;
+    myStatRow.append(box);
   });
-  myCard.append(statGrid);
-
-  // Net worth = wallet total
-  const nwBox = el('div',{style:{padding:'12px 16px',background:'rgba(167,139,250,.06)',border:'1px solid rgba(167,139,250,.2)',borderRadius:'10px',display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'12px'}});
-  nwBox.innerHTML=`<div><div class="f10 mut mb2">NET WORTH</div><div class="f11 mut">Total wallet balance</div></div><div style="font-family:Orbitron,sans-serif;font-size:18px;color:#a78bfa">$${myNetWorth.toFixed(2)}</div>`;
-  myCard.append(nwBox);
+  myCard.append(myStatRow);
 
   // Wallet breakdown
-  const walletRow = el('div', {style:{display:'flex',gap:'8px',flexWrap:'wrap'}});
-  STATE.wallet.filter(w=>w.balance>0).forEach((w,i) => {
-    const color = SLICE_COLORS[i%SLICE_COLORS.length];
-    const pct = myNetWorth>0?(w.balance/myNetWorth*100).toFixed(0):0;
-    const box = el('div',{style:{flex:'1',minWidth:'80px',padding:'10px 12px',background:`${color}0d`,border:`1px solid ${color}33`,borderRadius:'10px'}});
-    box.innerHTML=`<div class="f10 mut mb4">${w.name}</div><div style="font-family:Orbitron,sans-serif;font-size:13px;color:${color}">$${w.balance.toFixed(2)}</div><div class="f10 mut">${pct}%</div>`;
-    walletRow.append(box);
-  });
-  if (STATE.wallet.filter(w=>w.balance>0).length) myCard.append(walletRow);
+  if (STATE.wallet.length) {
+    const totalBal = STATE.wallet.reduce((s,w)=>s+w.balance,0);
+    const walletRow = el('div', {style:{display:'flex',gap:'8px',flexWrap:'wrap'}});
+    STATE.wallet.filter(w=>w.balance>0).forEach((w,i) => {
+      const color = SLICE_COLORS[i%SLICE_COLORS.length];
+      const pct = totalBal>0?(w.balance/totalBal*100).toFixed(0):0;
+      const box = el('div', {style:{flex:'1',minWidth:'80px',padding:'10px 12px',background:`rgba(${i===0?'0,255,136':i===1?'0,212,255':'167,139,250'},.06)`,border:`1px solid ${color}33`,borderRadius:'10px'}});
+      box.innerHTML = `<div class="f10 mut mb4">${w.name}</div><div style="font-family:Orbitron,sans-serif;font-size:13px;color:${color}">$${w.balance.toFixed(2)}</div><div class="f10 mut">${pct}%</div>`;
+      walletRow.append(box);
+    });
+    myCard.append(walletRow);
+  }
+
   col.append(myCard);
   container.append(col);
 }
 
-// ─── MEMBER STATS MODAL ───────────────────────────────────────────────────────
-async function showMemberStatsModal(member) {
-  const overlay = el('div', {className:'overlay', onclick:e=>{ if(e.target===overlay) overlay.remove(); }});
-  const modal   = el('div', {className:'modal slide', style:{maxWidth:'480px'}});
-  modal.innerHTML = `
-    <div class="modal-title nb">${member.display_name||member.username}</div>
-    <div class="modal-sub">@${member.username}${member.id===STATE.user.id?' · YOU':''}</div>
-  `;
-  const body = el('div');
-  body.innerHTML = '<div class="mut f12 text-center" style="padding:30px">Loading stats…</div>';
-  modal.append(body);
-  const closeBtn = el('button',{className:'btn btn-o',style:{marginTop:'12px',width:'100%'},onclick:()=>overlay.remove()},'CLOSE');
-  modal.append(closeBtn);
-  overlay.append(modal);
-  document.body.append(overlay);
-
-  let data;
-  try {
-    data = await api('GET', `/groups/member/${member.id}/stats`);
-  } catch(e) {
-    body.innerHTML = `<div class="mut f12 text-center" style="padding:30px">Error: ${e.message}</div>`;
-    return;
-  }
-  if (!data) { body.innerHTML = '<div class="mut f12 text-center" style="padding:30px">No data.</div>'; return; }
-
-  let activePeriod = 'total';
-  const PLBLS2 = {day:'Today',week:'This Week',month:'This Month',year:'This Year',total:'All Time'};
-
-  function buildBody() {
-    body.innerHTML = '';
-    const s = data.stats[activePeriod] || {};
-
-    // Period tabs
-    const tabs = el('div', {style:{display:'flex',gap:'6px',flexWrap:'wrap',marginBottom:'16px'}});
-    ['day','week','month','year','total'].forEach(p => {
-      const b = el('button', {className:`ptab ${p===activePeriod?'active':''}`,
-        onclick:()=>{ activePeriod=p; buildBody(); }}, PLBLS2[p].toUpperCase());
-      tabs.append(b);
-    });
-    body.append(tabs);
-
-    // Performance stats
-    const grid = el('div', {style:{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'8px',marginBottom:'14px'}});
-    [
-      {l:'PERFORMANCE', v:fmt(s.total||0), c:(s.total||0)>=0?'#00ff88':'#ff3366'},
-      {l:'PROFIT',      v:`+$${(s.profit||0).toFixed(2)}`, c:'#00ff88'},
-      {l:'LOSS',        v:fmt(s.loss||0), c:'#ff3366'},
-    ].forEach(x => {
-      const box=el('div',{style:{padding:'10px',background:'rgba(255,255,255,.03)',border:'1px solid var(--bdr)',borderRadius:'10px',textAlign:'center'}});
-      box.innerHTML=`<div class="f10 mut mb4">${x.l}</div><div style="font-family:Orbitron,sans-serif;font-size:13px;color:${x.c}">${x.v}</div>`;
-      grid.append(box);
-    });
-    body.append(grid);
-
-    // Best / Worst records
-    const recRow = el('div', {style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'8px',marginBottom:'14px'}});
-    const unit = {day:'Day',week:'Week',month:'Month',year:'Year',total:'Month'}[activePeriod];
-    [
-      {l:`BEST ${unit.toUpperCase()}`,  v:s.best!==null&&s.best!==undefined?fmt(s.best):'—', c:'#00ff88', icon:'🏆'},
-      {l:`WORST ${unit.toUpperCase()}`, v:s.worst!==null&&s.worst!==undefined?fmt(s.worst):'—', c:'#ff3366', icon:'📉'},
-    ].forEach(x => {
-      const box=el('div',{style:{padding:'12px',background:'rgba(255,255,255,.03)',border:'1px solid var(--bdr)',borderRadius:'10px',display:'flex',alignItems:'center',gap:'10px'}});
-      box.innerHTML=`<span style="font-size:20px">${x.icon}</span><div><div class="f10 mut mb2">${x.l}</div><div style="font-family:Orbitron,sans-serif;font-size:14px;color:${x.c}">${x.v}</div></div>`;
-      recRow.append(box);
-    });
-    body.append(recRow);
-
-    // Net worth = wallet total
-    const netWorth = (data.wallets||[]).reduce((s,w)=>s+w.balance,0);
-    const nwBox = el('div',{style:{padding:'12px 16px',background:'rgba(167,139,250,.06)',border:'1px solid rgba(167,139,250,.2)',borderRadius:'10px',display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'14px'}});
-    nwBox.innerHTML=`<div><div class="f10 mut mb2">NET WORTH</div><div class="f11 mut">Total wallet balance</div></div><div style="font-family:Orbitron,sans-serif;font-size:18px;color:#a78bfa">$${netWorth.toFixed(2)}</div>`;
-    body.append(nwBox);
-
-    // Wallets
-    if (data.wallets?.length) {
-      const wCard = el('div',{style:{padding:'14px',background:'rgba(255,255,255,.02)',border:'1px solid var(--bdr)',borderRadius:'12px',marginBottom:'14px'}});
-      wCard.innerHTML='<div class="f11 mut mb10" style="letter-spacing:2px">WALLETS</div>';
-      data.wallets.forEach((w,i) => {
-        const color=SLICE_COLORS[i%SLICE_COLORS.length];
-        const pct=netWorth>0?(w.balance/netWorth*100).toFixed(0):0;
-        const wr=el('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'6px 0',borderBottom:'1px solid rgba(255,255,255,.04)'}});
-        wr.innerHTML=`<div class="flex-gap8"><div style="width:8px;height:8px;border-radius:50%;background:${color}"></div><span class="f12">${w.name}</span></div><div style="text-align:right"><div style="font-family:Orbitron,sans-serif;font-size:13px;color:${color}">$${w.balance.toFixed(2)}</div><div class="f10 mut">${pct}%</div></div>`;
-        wCard.append(wr);
-      });
-      body.append(wCard);
-    }
-
-    // Fund contribution
-    const confirmed = STATE.deposits.filter(d=>d.status==='confirmed'&&d.user_id===member.id);
-    const contrib = confirmed.reduce((s,d)=>s+d.amount,0);
-    if (contrib > 0 || confirmed.length > 0) {
-      const cBox = el('div',{style:{padding:'12px 16px',background:'rgba(0,255,136,.06)',border:'1px solid rgba(0,255,136,.2)',borderRadius:'10px',display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'14px'}});
-      cBox.innerHTML=`<div><div class="f10 mut mb2">FUND CONTRIBUTION</div><div class="f11 mut">${confirmed.length} deposit${confirmed.length!==1?'s':''}</div></div><div style="font-family:Orbitron,sans-serif;font-size:18px;color:#00ff88">$${contrib.toFixed(2)}</div>`;
-      body.append(cBox);
-    }
-
-    // Top categories for period
-    const cats = Array.isArray(data.categories) ? data.categories : (data.categories?.[activePeriod]||[]);
-    if (cats.length) {
-      const cCard=el('div',{style:{padding:'14px',background:'rgba(255,255,255,.02)',border:'1px solid var(--bdr)',borderRadius:'12px'}});
-      cCard.innerHTML='<div class="f11 mut mb10" style="letter-spacing:2px">TOP CATEGORIES</div>';
-      cats.forEach((c,i) => {
-        const color=c.amount>=0?SLICE_COLORS[i%SLICE_COLORS.length]:'#ff3366';
-        const cr=el('div',{style:{display:'flex',justifyContent:'space-between',padding:'5px 0',borderBottom:'1px solid rgba(255,255,255,.04)'}});
-        cr.innerHTML=`<span class="f12">${c.name}</span><span style="color:${color};font-family:Orbitron,sans-serif;font-size:12px">${c.amount>=0?'+':''}$${Math.abs(c.amount).toFixed(2)}</span>`;
-        cCard.append(cr);
-      });
-      body.append(cCard);
-    }
-  }
-
-  buildBody();
-}
-
 // ─── AI INSIGHTS ─────────────────────────────────────────────────────────────
-async function renderInsights(container) {
-  container.innerHTML = '';
-  const col = el('div', {className:'flex-col', style:{gap:'20px'}});
+function renderInsights(container) {
+  const card = el('div', {className:'card'});
+  const header = el('div', {className:'flex-between mb16'});
+  header.innerHTML = '<div class="section-title">🤖 AI INSIGHTS</div>';
 
-  // Header
-  const hdr = el('div', {style:{padding:'20px 24px',background:'linear-gradient(135deg,rgba(0,212,255,.08),rgba(167,139,250,.08))',border:'1px solid rgba(0,212,255,.2)',borderRadius:'16px'}});
-  hdr.innerHTML = '<div style="font-family:Orbitron,sans-serif;font-size:18px;color:#00d4ff;margin-bottom:4px">◐ FINANCIAL COACH</div><div class="f11 mut">AI-powered analysis · updated on demand</div>';
-  col.append(hdr);
+  const genBtn = el('button', {className:'btn btn-o btn-sm'}, 'GENERATE');
+  const resultsDiv = el('div', {className:'flex-col', style:{gap:'10px'}});
 
-  if (STATE.transactions.length < 3) {
-    col.append(html('<div class="card text-center mut f12" style="padding:40px">Add at least 3 transactions to unlock your financial coach.</div>'));
-    container.append(col);
-    return;
+  if (!STATE.transactions.length) {
+    resultsDiv.append(html('<div class="text-center mut f12" style="padding:20px">Add transactions to unlock AI insights</div>'));
+    genBtn.disabled = true;
   }
 
-  // Snapshot stats
-  const today = filterByPeriod(STATE.transactions,'day').reduce((s,t)=>s+t.amount,0);
-  const week  = filterByPeriod(STATE.transactions,'week').reduce((s,t)=>s+t.amount,0);
-  const month = filterByPeriod(STATE.transactions,'month').reduce((s,t)=>s+t.amount,0);
-  const year  = filterByPeriod(STATE.transactions,'year').reduce((s,t)=>s+t.amount,0);
-  const walletTotal = STATE.wallet.reduce((s,w)=>s+w.balance,0);
-
-  const snapCard = el('div', {className:'card'});
-  snapCard.innerHTML = '<div class="section-title mb12">SNAPSHOT</div>';
-  const grid = el('div', {style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px'}});
-  [{l:'TODAY',v:today,i:'☀'},{l:'THIS WEEK',v:week,i:'📅'},{l:'THIS MONTH',v:month,i:'🗓'},{l:'THIS YEAR',v:year,i:'📊'}].forEach(s=>{
-    const b = el('div',{style:{padding:'12px',background:'rgba(255,255,255,.03)',border:'1px solid var(--bdr)',borderRadius:'10px'}});
-    b.innerHTML=`<div class="f10 mut mb4">${s.i} ${s.l}</div><div style="font-family:Orbitron,sans-serif;font-size:14px;color:${s.v>=0?'#00ff88':'#ff3366'}">${fmt(s.v)}</div>`;
-    grid.append(b);
-  });
-  snapCard.append(grid);
-  col.append(snapCard);
-
-  // AI analysis card
-  const aiCard = el('div', {className:'card'});
-  const aiHdr  = el('div', {className:'flex-between mb12'});
-  aiHdr.innerHTML = '<div class="section-title">AI ANALYSIS</div>';
-  const refreshBtn = el('button', {className:'btn btn-o btn-sm'}, '↺ REFRESH');
-  aiHdr.append(refreshBtn);
-  aiCard.append(aiHdr);
-  const resultsDiv = el('div');
-  resultsDiv.innerHTML = '<div class="mut f12 text-center" style="padding:20px">🤖 Analyzing your financial patterns…</div>';
-  aiCard.append(resultsDiv);
-  col.append(aiCard);
-  container.append(col);
-
-  async function doAnalysis() {
-    refreshBtn.disabled = true; refreshBtn.textContent = '...';
-    resultsDiv.innerHTML = '<div class="mut f12 text-center" style="padding:20px"><span class="spin" style="font-size:18px;display:inline-block">◌</span> Analyzing…</div>';
-
-    const bycat = {};
-    STATE.transactions.forEach(t=>{ bycat[t.category]=(bycat[t.category]||0)+t.amount; });
-    const monthlyTrend = {};
-    STATE.transactions.forEach(t=>{ const mk=t.date.slice(0,7); monthlyTrend[mk]=(monthlyTrend[mk]||0)+t.amount; });
-    const last6 = Object.entries(monthlyTrend).sort((a,b)=>a[0].localeCompare(b[0])).slice(-6);
-
-    const summary = {
-      netWorth: +walletTotal.toFixed(2),
-      wallets: STATE.wallet.map(w=>({name:w.name,balance:+w.balance.toFixed(2)})),
-      periods: {today:+today.toFixed(2),week:+week.toFixed(2),month:+month.toFixed(2),year:+year.toFixed(2)},
-      topCategories: Object.entries(bycat).sort((a,b)=>b[1]-a[1]).slice(0,8).map(([k,v])=>({category:k,total:+v.toFixed(2)})),
-      monthlyTrend: last6.map(([m,v])=>({month:m,total:+v.toFixed(2)})),
-      totalTransactions: STATE.transactions.length,
-      inGroup: !!STATE.group,
-    };
-
+  genBtn.onclick = async () => {
+    genBtn.disabled=true; genBtn.textContent='ANALYZING...';
+    resultsDiv.innerHTML='<div class="flex-gap8 mut f13"><span class="spin" style="font-size:18px">◌</span> Analyzing your financial patterns...</div>';
     try {
-      const res = await fetch('https://api.anthropic.com/v1/messages',{
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({
-          model:'claude-sonnet-4-20250514', max_tokens:1200,
-          messages:[{role:'user',content:'You are a personal financial coach. Return EXACTLY 5 insights as JSON array. Each object: {icon,title,detail,type} where type is positive|warning|tip. JSON only. Data: '+JSON.stringify(summary)}]
-        })
-      });
-      const text = (data.content||[]).map(c=>c.text||'').join('').replace(/```json|```/g,'').trim();
-      const insights = JSON.parse(text);
-      resultsDiv.innerHTML = '';
-      const typeStyle = {
-        positive:{bg:'rgba(0,255,136,.06)',border:'rgba(0,255,136,.2)'},
-        warning: {bg:'rgba(255,51,102,.06)', border:'rgba(255,51,102,.2)'},
-        tip:     {bg:'rgba(167,139,250,.06)',border:'rgba(167,139,250,.2)'},
+      const summary = {
+        total:   STATE.transactions.reduce((s,t)=>s+t.amount,0),
+        count:   STATE.transactions.length,
+        weekly:  STATE.transactions.filter(t=>t.date>=cutoffMap.week()).reduce((s,t)=>s+t.amount,0),
+        monthly: STATE.transactions.filter(t=>t.date>=cutoffMap.month()).reduce((s,t)=>s+t.amount,0),
+        byCategory: STATE.categories.map(c=>({cat:c,sum:STATE.transactions.filter(t=>t.category===c).reduce((s,t)=>s+t.amount,0)})).filter(x=>x.sum!==0),
+        recent: STATE.transactions.slice(-10).map(t=>({amount:t.amount,category:t.category,date:t.date})),
       };
+      const res  = await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1000,messages:[{role:'user',content:`Financial AI. Analyze data, return EXACTLY 5 smart insights as JSON array. Each: {"icon":"<emoji>","title":"<short title>","detail":"<1-2 specific sentences>"}. JSON only, no markdown.\n\nData: ${JSON.stringify(summary)}`}]})});
+      const data = await res.json();
+      const text = (data.content?.[0]?.text||'[]').replace(/```json|```/g,'').trim();
+      const insights = JSON.parse(text);
+      resultsDiv.innerHTML='';
       insights.forEach((ins,i) => {
-        const s = typeStyle[ins.type]||typeStyle.tip;
-        const box = el('div',{style:{padding:'16px',background:s.bg,border:`1px solid ${s.border}`,borderRadius:'12px',marginBottom:'10px'},className:'slide'});
-        box.innerHTML=`<div class="flex-gap8 mb8"><span style="font-size:22px">${ins.icon}</span><div class="f13 bold" style="flex:1">${ins.title}</div></div><div class="f12" style="line-height:1.7;color:#94a3b8">${ins.detail}</div>`;
-        resultsDiv.append(box);
+        const div = el('div', {style:{padding:'12px 14px',background:'rgba(0,212,255,.04)',border:'1px solid rgba(0,212,255,.1)',borderRadius:'10px'}});
+        div.innerHTML=`<div class="flex-gap10 f13"><span style="font-size:20px">${ins.icon}</span><div><div class="bold nb mb4">${ins.title}</div><div class="f12 mut" style="line-height:1.5">${ins.detail}</div></div></div>`;
+        resultsDiv.append(div);
       });
-    } catch(e) {
-      resultsDiv.innerHTML=`<div class="err">Could not generate analysis: ${e.message}</div>`;
-    }
-    refreshBtn.disabled=false; refreshBtn.textContent='↺ REFRESH';
-  }
+    } catch(e) { resultsDiv.innerHTML=`<div class="err">Could not generate insights: ${e.message}</div>`; }
+    genBtn.disabled=false; genBtn.textContent='GENERATE';
+  };
 
-  refreshBtn.onclick = doAnalysis;
-  doAnalysis();
+  header.append(genBtn);
+  card.append(header, resultsDiv);
+  container.append(card);
 }
 
 // ─── SETTINGS ────────────────────────────────────────────────────────────────
