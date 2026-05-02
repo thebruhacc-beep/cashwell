@@ -201,6 +201,10 @@ router.delete('/groups/leave', requireAuth, (req, res) => {
   if (kickId !== req.user.id && g.admin_id !== req.user.id)
     return res.status(403).json({ error: 'Only admin can kick members' });
 
+  // Reset all deposits of the leaving/kicked member to 0
+  db.prepare("UPDATE deposits SET amount=0, status='cancelled', cancelled_at=? WHERE group_id=? AND user_id=? AND status='confirmed'")
+    .run(new Date().toISOString(), gid, kickId);
+
   db.prepare('DELETE FROM group_members WHERE group_id=? AND user_id=?').run(gid, kickId);
 
   const remaining = db.prepare('SELECT COUNT(*) as c FROM group_members WHERE group_id=?').get(gid);
@@ -338,148 +342,6 @@ router.post('/messages/:id/vote', requireAuth, (req, res) => {
     db.prepare('INSERT INTO poll_votes (message_id,user_id,option_idx) VALUES (?,?,?)').run(req.params.id, req.user.id, optionIdx);
   }
   res.json({ ok: true });
-});
-
-
-// ─── GROUP MEMBER STATS (for profile modal) ───────────────────────────────────
-router.get('/groups/member/:userId/stats', requireAuth, (req, res) => {
-  // Allow viewing own stats OR stats of members in same group
-  const requesterGid = userGroupId(req.user.id);
-  const targetGid    = userGroupId(req.params.userId);
-  const isSelf       = req.user.id === req.params.userId;
-  if (!isSelf && (!requesterGid || requesterGid !== targetGid)) {
-    return res.status(403).json({ error: 'Not in same group' });
-  }
-
-  const userId = req.params.userId;
-  const txns   = db.prepare('SELECT * FROM transactions WHERE user_id=? ORDER BY date DESC').all(userId);
-  const wallets= db.prepare('SELECT * FROM wallet_types WHERE user_id=?').all(userId);
-  const confirmed = db.prepare("SELECT * FROM deposits WHERE user_id=? AND status='confirmed'").all(userId);
-
-  // Period helpers
-  const now   = new Date();
-  const pad   = n => String(n).padStart(2,'0');
-  const today = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}`;
-  const day   = now.getDay();
-  const wDiff = day === 0 ? 6 : day - 1;
-  const wStart= new Date(now); wStart.setDate(now.getDate()-wDiff);
-  const weekStart = `${wStart.getFullYear()}-${pad(wStart.getMonth()+1)}-${pad(wStart.getDate())}`;
-  const monthStart= `${now.getFullYear()}-${pad(now.getMonth()+1)}-01`;
-  const yearStart = `${now.getFullYear()}-01-01`;
-
-  const sum = arr => arr.reduce((s,t)=>s+t.amount,0);
-  const periodTxns = {
-    day:   txns.filter(t=>t.date===today),
-    week:  txns.filter(t=>t.date>=weekStart),
-    month: txns.filter(t=>t.date>=monthStart),
-    year:  txns.filter(t=>t.date>=yearStart),
-    total: txns,
-  };
-
-  // Best/worst bucketed per period unit
-  function getBestWorst(arr, unit) {
-    const map = {};
-    arr.forEach(t => {
-      let k;
-      if      (unit === 'day')   k = t.date;
-      else if (unit === 'week')  { const d=new Date(t.date+'T12:00:00'); const s2=new Date(d); s2.setDate(d.getDate()-((d.getDay()||7)-1)); k=s2.toISOString().split('T')[0]; }
-      else if (unit === 'month') k = t.date.slice(0,7);
-      else if (unit === 'year')  k = t.date.slice(0,4);
-      else                        k = t.date.slice(0,7);
-      map[k] = (map[k]||0)+t.amount;
-    });
-    const vals = Object.values(map).filter(v=>v!==0);
-    return { best: vals.length?Math.max(...vals):null, worst: vals.length?Math.min(...vals):null };
-  }
-
-  const stats = {};
-  Object.entries(periodTxns).forEach(([p,arr]) => {
-    // For records, use ALL transactions bucketed by the unit of this period
-    const bw = getBestWorst(txns, p);
-    stats[p] = {
-      total:   +sum(arr).toFixed(2),
-      profit:  +sum(arr.filter(t=>t.amount>0)).toFixed(2),
-      loss:    +sum(arr.filter(t=>t.amount<0)).toFixed(2),
-      entries: arr.length,
-      best:    bw.best  !== null ? +bw.best.toFixed(2)  : null,
-      worst:   bw.worst !== null ? +bw.worst.toFixed(2) : null,
-    };
-  });
-
-  // Category breakdown for each period
-  const catsByPeriod = {};
-  Object.entries(periodTxns).forEach(([p,arr]) => {
-    const catMap = {};
-    arr.forEach(t=>{ catMap[t.category]=(catMap[t.category]||0)+t.amount; });
-    catsByPeriod[p] = Object.entries(catMap)
-      .sort((a,b)=>b[1]-a[1]).slice(0,5)
-      .map(([name,amount])=>({ name, amount:+amount.toFixed(2) }));
-  });
-
-  const totalDeposited = confirmed.reduce((s,d)=>s+d.amount,0);
-
-  res.json({ stats, wallets, categories: catsByPeriod, totalDeposited: +totalDeposited.toFixed(2), txCount: txns.length });
-});
-
-// ─── ADMIN: update confirmed deposit amount ───────────────────────────────────
-router.patch('/deposits/:id/amount', requireAuth, (req, res) => {
-  const gid = userGroupId(req.user.id);
-  if (!gid) return res.status(403).json({ error: 'Not in a group' });
-  const g = db.prepare('SELECT * FROM groups_table WHERE id=?').get(gid);
-  if (g.admin_id !== req.user.id) return res.status(403).json({ error: 'Admin only' });
-
-  const dep = db.prepare('SELECT * FROM deposits WHERE id=?').get(req.params.id);
-  if (!dep || dep.group_id !== gid) return res.status(404).json({ error: 'Deposit not found' });
-
-  const { amount } = req.body || {};
-  if (amount === undefined || isNaN(amount) || amount < 0) return res.status(400).json({ error: 'Invalid amount' });
-
-  db.prepare('UPDATE deposits SET amount=? WHERE id=?').run(+parseFloat(amount).toFixed(2), dep.id);
-  res.json({ ok: true, amount: +parseFloat(amount).toFixed(2) });
-});
-
-// ─── ADMIN: update member wallet balance ──────────────────────────────────────
-router.patch('/groups/admin/wallet', requireAuth, (req, res) => {
-  const gid = userGroupId(req.user.id);
-  if (!gid) return res.status(403).json({ error: 'Not in a group' });
-  const g = db.prepare('SELECT * FROM groups_table WHERE id=?').get(gid);
-  if (g.admin_id !== req.user.id) return res.status(403).json({ error: 'Admin only' });
-
-  const { userId, walletName, balance, note } = req.body || {};
-  if (!userId || !walletName || balance === undefined) return res.status(400).json({ error: 'userId, walletName, balance required' });
-
-  // Upsert wallet balance
-  db.prepare('INSERT INTO wallet_types (user_id,name,balance) VALUES (?,?,?) ON CONFLICT(user_id,name) DO UPDATE SET balance=?')
-    .run(userId, walletName, balance, balance);
-
-  // Log as a system transaction if note provided
-  if (note) {
-    const { v4: uuidv4 } = require('uuid');
-    const prev = db.prepare('SELECT balance FROM wallet_types WHERE user_id=? AND name=?').get(userId, walletName);
-    const diff = balance - (prev?.balance || 0);
-    if (diff !== 0) {
-      db.prepare('INSERT INTO transactions (id,user_id,amount,category,wallet,date,note,created_at) VALUES (?,?,?,?,?,?,?,?)')
-        .run(uuidv4(), userId, +diff.toFixed(2), 'Admin Adjustment', walletName, new Date().toISOString().split('T')[0], note, new Date().toISOString());
-    }
-  }
-
-  res.json({ ok: true });
-});
-
-// ─── ADMIN: get all members with their wallet details ─────────────────────────
-router.get('/groups/admin/members', requireAuth, (req, res) => {
-  const gid = userGroupId(req.user.id);
-  if (!gid) return res.status(403).json({ error: 'Not in a group' });
-  const g = db.prepare('SELECT * FROM groups_table WHERE id=?').get(gid);
-  if (g.admin_id !== req.user.id) return res.status(403).json({ error: 'Admin only' });
-
-  const members = db.prepare(`SELECT u.id,u.username,u.display_name,u.avatar FROM users u JOIN group_members gm ON gm.user_id=u.id WHERE gm.group_id=?`).all(gid);
-  const result = members.map(m => {
-    const wallets = db.prepare('SELECT * FROM wallet_types WHERE user_id=?').all(m.id);
-    const deposits = db.prepare("SELECT COALESCE(SUM(amount),0) as total FROM deposits WHERE user_id=? AND status='confirmed'").get(m.id);
-    return { ...m, wallets, totalDeposited: deposits.total };
-  });
-  res.json(result);
 });
 
 module.exports = router;
