@@ -12,7 +12,6 @@ const STATE = {
   group:        null,
   deposits:     [],
   messages:     [],
-  socket:       null,
   charts:       {},   // chart.js instances keyed by canvas id
 };
 
@@ -226,33 +225,59 @@ async function api(method, path, body) {
   return data;
 }
 
-// ─── SOCKET ───────────────────────────────────────────────────────────────────
-function initSocket() {
-  if (STATE.socket) STATE.socket.disconnect();
-  const socket = io({ auth: { token: STATE.token } });
+// ─── POLLING ──────────────────────────────────────────────────────────────────
+// Replaces Socket.io: on serverless hosting (Vercel/Netlify/Cloudflare) there's
+// no long-running process to hold a websocket open, so instead we just re-fetch
+// the group's live data every few seconds and diff it against what we already
+// have. Slightly less instant than a push, but invisible in practice for a
+// group-finance app.
+let pollTimer = null;
 
-  socket.on('connect', () => console.log('🔌 Socket connected'));
-  socket.on('disconnect', () => console.log('🔌 Socket disconnected'));
+function startPolling() {
+  stopPolling();
+  pollTimer = setInterval(pollForUpdates, 4000);
+}
 
-  socket.on('message:new', msg => {
-    if (!STATE.messages.find(m => m.id === msg.id)) {
-      STATE.messages.push(msg);
+function stopPolling() {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = null;
+}
+
+async function pollForUpdates() {
+  if (!STATE.token) return;
+  try {
+    // New chat messages
+    const msgs = await api('GET', '/messages');
+    const knownIds = new Set(STATE.messages.map(m => m.id));
+    const fresh = msgs.filter(m => !knownIds.has(m.id));
+    STATE.messages = msgs;
+    if (fresh.length) {
       if (STATE.page === 'chat') renderPage();
-      toast('New Message', `${msg.username}: ${msg.type==='poll'?'📊 Poll':msg.content}`);
+      fresh.forEach(msg => {
+        if (msg.user_id !== STATE.user?.id) {
+          toast('New Message', `${msg.username}: ${msg.type==='poll' ? '📊 Poll' : msg.content}`);
+        }
+      });
     }
-  });
 
-  socket.on('deposit:update', () => {
-    loadAll().then(() => { if (STATE.page === 'groups') renderPage(); });
-    toast('Deposit Updated', 'Fund status changed');
-  });
-
-  socket.on('group:refresh', () => {
-    loadAll().then(() => renderPage());
-    toast('Group Updated', 'Group data refreshed');
-  });
-
-  STATE.socket = socket;
+    // Group + deposits
+    if (STATE.group) {
+      const [grp, deps] = await Promise.all([api('GET', '/groups/mine'), api('GET', '/deposits')]);
+      const grpChanged  = JSON.stringify(grp)  !== JSON.stringify(STATE.group);
+      const depsChanged = JSON.stringify(deps) !== JSON.stringify(STATE.deposits);
+      STATE.group    = grp;
+      STATE.deposits = deps;
+      if (depsChanged) {
+        if (STATE.page === 'groups') renderPage();
+        toast('Deposit Updated', 'Fund status changed');
+      } else if (grpChanged) {
+        if (STATE.page === 'groups') renderPage();
+        toast('Group Updated', 'Group data refreshed');
+      }
+    }
+  } catch (e) {
+    console.error('poll error:', e);
+  }
 }
 
 // ─── DATA LOADING ─────────────────────────────────────────────────────────────
@@ -335,7 +360,7 @@ function renderAuth() {
         STATE.user  = result.user;
         localStorage.setItem('nf_token', result.token);
         await loadAll();
-        initSocket();
+        startPolling();
         renderApp();
       } catch(e) {
         errDiv.textContent = e.message;
@@ -443,7 +468,7 @@ function buildSidebar() {
 
 function logout() {
   localStorage.removeItem('nf_token');
-  STATE.token = null; STATE.user = null; STATE.socket?.disconnect();
+  STATE.token = null; STATE.user = null; stopPolling();
   Object.assign(STATE, {transactions:[],wallet:[],categories:[],group:null,deposits:[],messages:[]});
   renderAuth();
   document.getElementById('app').innerHTML = '';
@@ -1527,7 +1552,7 @@ function buildNoGroupCard() {
       const go   = el('button', {className:'btn btn-g', style:{flex:'2'}}, 'CREATE');
       go.onclick = async () => {
         go.disabled=true; go.textContent='...';
-        try { STATE.group = await api('POST','/groups',{name:inp.value.trim()}); STATE.deposits=[]; STATE.messages=[]; STATE.socket?.emit('group:change'); renderPage(); }
+        try { STATE.group = await api('POST','/groups',{name:inp.value.trim()}); STATE.deposits=[]; STATE.messages=[]; renderPage(); }
         catch(e){ err.textContent=e.message; go.disabled=false; go.textContent='CREATE'; }
       };
       inp.addEventListener('keydown', e=>{ if(e.key==='Enter') go.click(); });
@@ -1542,7 +1567,7 @@ function buildNoGroupCard() {
       const go   = el('button', {className:'btn btn-g', style:{flex:'2'}}, 'JOIN');
       go.onclick = async () => {
         go.disabled=true; go.textContent='...';
-        try { STATE.group = await api('POST','/groups/join',{code:inp.value.trim()}); STATE.deposits=await api('GET','/deposits'); STATE.messages=await api('GET','/messages'); STATE.socket?.emit('group:change'); toast('Joined!',`Welcome to "${STATE.group.name}"`); renderPage(); }
+        try { STATE.group = await api('POST','/groups/join',{code:inp.value.trim()}); STATE.deposits=await api('GET','/deposits'); STATE.messages=await api('GET','/messages'); toast('Joined!',`Welcome to "${STATE.group.name}"`); renderPage(); }
         catch(e){ err.textContent=e.message; go.disabled=false; go.textContent='JOIN'; }
       };
       inp.addEventListener('keydown', e=>{ if(e.key==='Enter') go.click(); });
@@ -1663,7 +1688,6 @@ function buildGroupInfoCard() {
       const kickBtn = el('button', {className:'btn btn-r btn-sm', onclick:async()=>{
         await api('DELETE','/groups/leave',{targetUserId:m.id});
         STATE.group.members = STATE.group.members.filter(x=>x.id!==m.id);
-        STATE.socket?.emit('group:change');
         toast('Member removed','');
         renderPage();
       }}, 'KICK');
@@ -1677,7 +1701,7 @@ function buildGroupInfoCard() {
     style:{color:'#ff3366',borderColor:'rgba(255,51,102,.3)'},
     onclick: async () => {
       await api('DELETE','/groups/leave');
-      STATE.group=null; STATE.deposits=[]; STATE.socket?.emit('group:change');
+      STATE.group=null; STATE.deposits=[];
       toast('Left group',''); renderPage();
     }
   }, isAdmin && STATE.group.members.length===1 ? 'DELETE GROUP' : 'LEAVE GROUP');
@@ -1759,7 +1783,6 @@ function showDepositModal() {
         try {
           const dep = await api('POST','/deposits',{amount:chosenAmount,source:chosenSource,method:'PayPal'});
           STATE.deposits.unshift(dep);
-          STATE.socket?.emit('deposit:change', dep);
           toast('Deposit Submitted', `$${chosenAmount.toFixed(2)} pending admin approval`);
           overlay.remove();
           renderPage();
@@ -1794,7 +1817,6 @@ function showPaymentSettingsModal() {
     await api('PUT','/groups/payment',{paypal:ppInp.value.trim(),pay_note:noteInp.value.trim()});
     STATE.group.paypal   = ppInp.value.trim();
     STATE.group.pay_note = noteInp.value.trim();
-    STATE.socket?.emit('group:change');
     toast('Payment settings saved','');
     overlay.remove();
     renderPage();
@@ -1848,7 +1870,6 @@ function showBreakdownModal() {
         confBtn.onclick = async () => {
           const updated = await api('PUT',`/deposits/${d.id}/confirm`);
           STATE.deposits = STATE.deposits.map(x=>x.id===updated.id?updated:x);
-          STATE.socket?.emit('deposit:change', updated);
           // Also update wallet state if it's our own deposit
           if (d.user_id === STATE.user.id) {
             STATE.wallet = await api('GET','/wallet');
@@ -1859,7 +1880,6 @@ function showBreakdownModal() {
         cancBtn.onclick = async () => {
           const updated = await api('PUT',`/deposits/${d.id}/cancel`);
           STATE.deposits = STATE.deposits.map(x=>x.id===updated.id?updated:x);
-          STATE.socket?.emit('deposit:change', updated);
           toast('Cancelled', `Deposit marked not received`);
           overlay.remove(); renderPage();
         };
@@ -1973,7 +1993,6 @@ function renderChatPage(container) {
         if (!question || options.length<2) return;
         const msg = await api('POST','/messages',{type:'poll',content:JSON.stringify({question,options:options.map(t=>({text:t}))})});
         STATE.messages.push(msg);
-        STATE.socket?.emit('message:send', msg);
         pollMode=false; buildInputRow(); renderPage();
       };
       row.append(addOptBtn, cancel, send);
@@ -1987,7 +2006,6 @@ function renderChatPage(container) {
         if (!msgInp.value.trim()) return;
         const msg = await api('POST','/messages',{type:'text',content:msgInp.value.trim()});
         STATE.messages.push(msg);
-        STATE.socket?.emit('message:send', msg);
         msgInp.value='';
         const w = el('div', {className:'flex-col', style:{alignItems:'flex-end'}});
         const b = el('div', {className:'bubble-me'});
@@ -2282,7 +2300,7 @@ async function boot() {
     try {
       STATE.user = await api('GET', '/auth/me');
       await loadAll();
-      initSocket();
+      startPolling();
       renderApp();
     } catch {
       localStorage.removeItem('nf_token');
