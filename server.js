@@ -39,8 +39,8 @@ app.use((err, req, res, next) => {
 });
 
 // ─── SOCKET.IO — real-time group events ───────────────────────────────────────
-function userGroupId(userId) {
-  const r = db.prepare('SELECT group_id FROM group_members WHERE user_id=?').get(userId);
+async function userGroupId(userId) {
+  const r = await db.prepare('SELECT group_id FROM group_members WHERE user_id=?').get(userId);
   return r?.group_id || null;
 }
 
@@ -55,12 +55,14 @@ io.use((socket, next) => {
   }
 });
 
-io.on('connection', (socket) => {
+io.on('connection', async (socket) => {
   const userId = socket.user.id;
 
   // Join this user into their group's Socket room
-  const gid = userGroupId(userId);
-  if (gid) socket.join(`group:${gid}`);
+  try {
+    const gid = await userGroupId(userId);
+    if (gid) socket.join(`group:${gid}`);
+  } catch (e) { console.error('socket join error:', e); }
 
   // Re-join if they switch groups
   socket.on('group:join', (groupId) => {
@@ -69,28 +71,42 @@ io.on('connection', (socket) => {
   });
 
   // Broadcast new chat message to group
-  socket.on('message:send', (msg) => {
-    const g = userGroupId(userId);
-    if (g) socket.to(`group:${g}`).emit('message:new', msg);
+  socket.on('message:send', async (msg) => {
+    try {
+      const g = await userGroupId(userId);
+      if (g) socket.to(`group:${g}`).emit('message:new', msg);
+    } catch (e) { console.error('message:send error:', e); }
   });
 
   // Broadcast deposit changes to group
-  socket.on('deposit:change', (dep) => {
-    const g = userGroupId(userId);
-    if (g) io.to(`group:${g}`).emit('deposit:update', dep);
+  socket.on('deposit:change', async (dep) => {
+    try {
+      const g = await userGroupId(userId);
+      if (g) io.to(`group:${g}`).emit('deposit:update', dep);
+    } catch (e) { console.error('deposit:change error:', e); }
   });
 
   // Broadcast group structure changes (join/leave/payment settings)
-  socket.on('group:change', () => {
-    const g = userGroupId(userId);
-    if (g) socket.to(`group:${g}`).emit('group:refresh');
+  socket.on('group:change', async () => {
+    try {
+      const g = await userGroupId(userId);
+      if (g) socket.to(`group:${g}`).emit('group:refresh');
+    } catch (e) { console.error('group:change error:', e); }
   });
 
   socket.on('disconnect', () => {});
 });
 
 // ─── START ────────────────────────────────────────────────────────────────────
-server.listen(PORT, () => {
-  console.log(`\n🟢 NeonFinance running on http://localhost:${PORT}`);
-  console.log(`   Open your browser and go to http://localhost:${PORT}\n`);
+async function start() {
+  await db.initDb();
+  server.listen(PORT, () => {
+    console.log(`\n🟢 NeonFinance running on http://localhost:${PORT}`);
+    console.log(`   Open your browser and go to http://localhost:${PORT}\n`);
+  });
+}
+
+start().catch(err => {
+  console.error('❌ Failed to start server:', err);
+  process.exit(1);
 });
