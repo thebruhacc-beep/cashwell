@@ -19,6 +19,38 @@ const STATE = {
 const SLICE_COLORS = ['#00ff88','#00d4ff','#bf5fff','#ffe600','#ff8c00','#ff3366','#00ffcc','#c084fc'];
 const PERIODS      = ['day','week','month','year','total'];
 const PLABEL       = {day:'DAY',week:'WEEK',month:'MONTH',year:'YEAR',total:'ALL TIME'};
+
+// Symbol → CoinGecko coin id, for the free public price API (no key needed).
+const CRYPTO_COINS = {
+  BTC:'bitcoin', ETH:'ethereum', SOL:'solana', BNB:'binancecoin',
+  XRP:'ripple', ADA:'cardano', DOGE:'dogecoin', MATIC:'matic-network',
+  DOT:'polkadot', LTC:'litecoin', LINK:'chainlink', AVAX:'avalanche-2',
+  USDT:'tether', USDC:'usd-coin',
+};
+
+// symbol -> live USD price, refreshed periodically while logged in.
+let LIVE_PRICES = {};
+
+async function refreshLivePrices(extraSymbols = []) {
+  const symbols = [...new Set([...STATE.wallet.filter(w => w.asset).map(w => w.asset), ...extraSymbols])];
+  const ids = symbols.map(s => CRYPTO_COINS[s]).filter(Boolean).join(',');
+  if (!ids) return;
+  try {
+    const res  = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd`);
+    const data = await res.json();
+    symbols.forEach(s => {
+      const id = CRYPTO_COINS[s];
+      if (id && data[id]?.usd !== undefined) LIVE_PRICES[s] = data[id].usd;
+    });
+  } catch (e) { console.error('live price fetch error:', e); }
+}
+
+// Dollar value of a wallet: coin-amount × live price for crypto wallets,
+// or the raw balance for plain fiat wallets (asset === null).
+function walletUSD(w) {
+  if (w.asset) return (w.balance || 0) * (LIVE_PRICES[w.asset] || 0);
+  return w.balance || 0;
+}
 const NAV_ITEMS    = [
   {id:'dashboard',  icon:'◈', label:'Dashboard'},
   {id:'charts',     icon:'◉', label:'Charts'},
@@ -231,16 +263,21 @@ async function api(method, path, body) {
 // the group's live data every few seconds and diff it against what we already
 // have. Slightly less instant than a push, but invisible in practice for a
 // group-finance app.
-let pollTimer = null;
+let pollTimer  = null;
+let priceTimer = null;
 
 function startPolling() {
   stopPolling();
-  pollTimer = setInterval(pollForUpdates, 4000);
+  pollTimer  = setInterval(pollForUpdates, 4000);
+  refreshLivePrices();
+  priceTimer = setInterval(refreshLivePrices, 30000); // CoinGecko: refresh every 30s, not every 4s
 }
 
 function stopPolling() {
-  if (pollTimer) clearInterval(pollTimer);
+  if (pollTimer)  clearInterval(pollTimer);
+  if (priceTimer) clearInterval(priceTimer);
   pollTimer = null;
+  priceTimer = null;
 }
 
 async function pollForUpdates() {
@@ -255,7 +292,8 @@ async function pollForUpdates() {
       if (STATE.page === 'chat') renderPage();
       fresh.forEach(msg => {
         if (msg.user_id !== STATE.user?.id) {
-          toast('New Message', `${msg.username}: ${msg.type==='poll' ? '📊 Poll' : msg.content}`);
+          const preview = msg.type==='poll' ? '📊 Poll' : msg.type==='image' ? '📷 Photo' : msg.content;
+          toast('New Message', `${msg.username}: ${preview}`);
         }
       });
     }
@@ -423,9 +461,7 @@ function tickerInner() {
 // ─── SIDEBAR ──────────────────────────────────────────────────────────────────
 function buildSidebar() {
   const pendingCount = STATE.deposits.filter(d => d.status==='pending' && STATE.group?.admin_id===STATE.user?.id).length;
-  const walletTotal  = STATE.wallet.reduce((s,w) => s+w.balance, 0);
-  const txTotal      = STATE.transactions.reduce((s,t) => s+t.amount, 0);
-  const netWorth     = walletTotal + txTotal;
+  const netWorth      = STATE.wallet.reduce((s,w) => s+walletUSD(w), 0);
 
   const sb = el('div', {className:'sidebar'});
 
@@ -800,13 +836,20 @@ function buildWalletCard(showFundBtn=true) {
     if (!editing) {
       // Save all edited values
       card.querySelectorAll('.wallet-inp').forEach(inp => {
-        api('PUT', `/wallet/${encodeURIComponent(inp.dataset.name)}`, { balance: +inp.value })
-          .then(() => STATE.wallet = STATE.wallet.map(w => w.name===inp.dataset.name?{...w,balance:+inp.value}:w));
+        const assetSel = card.querySelector(`.wallet-asset-sel[data-name="${CSS.escape(inp.dataset.name)}"]`);
+        const asset = assetSel ? (assetSel.value || null) : null;
+        api('PUT', `/wallet/${encodeURIComponent(inp.dataset.name)}`, { balance: +inp.value, asset })
+          .then(() => {
+            STATE.wallet = STATE.wallet.map(w => w.name===inp.dataset.name?{...w,balance:+inp.value,asset}:w);
+            refreshLivePrices();
+          });
       });
       const newType = $('new-wallet-type');
       if (newType?.value.trim()) {
-        api('POST', '/wallet', {name:newType.value.trim()}).then(()=>{
-          STATE.wallet.push({name:newType.value.trim(),balance:0});
+        const newAsset = $('new-wallet-asset')?.value || null;
+        api('POST', '/wallet', {name:newType.value.trim(), asset:newAsset}).then(()=>{
+          STATE.wallet.push({name:newType.value.trim(),balance:0,asset:newAsset});
+          refreshLivePrices();
           renderWalletBody(body, false);
         });
       }
@@ -819,7 +862,7 @@ function buildWalletCard(showFundBtn=true) {
 
 function renderWalletBody(container, editing) {
   container.innerHTML = '';
-  const total = STATE.wallet.reduce((s,w)=>s+w.balance,0);
+  const total = STATE.wallet.reduce((s,w)=>s+walletUSD(w),0);
 
   if (!editing) {
     // Pie chart + list
@@ -828,54 +871,76 @@ function renderWalletBody(container, editing) {
     chartWrap.append(canvas);
     container.append(chartWrap);
 
-    const pieData = STATE.wallet.filter(w=>w.balance>0);
+    const pieData = STATE.wallet.filter(w=>walletUSD(w)>0);
     setTimeout(() => {
       const ex = STATE.charts['wallet-pie']; if(ex) ex.destroy();
       const ctx  = $('wallet-pie')?.getContext('2d');
       if (!ctx) return;
       STATE.charts['wallet-pie'] = new Chart(ctx, {
         type:'doughnut',
-        data:{ labels:pieData.map(w=>w.name), datasets:[{ data:pieData.map(w=>w.balance), backgroundColor:pieData.map((_,i)=>SLICE_COLORS[i%SLICE_COLORS.length]), borderWidth:0 }] },
+        data:{ labels:pieData.map(w=>w.name), datasets:[{ data:pieData.map(w=>walletUSD(w)), backgroundColor:pieData.map((_,i)=>SLICE_COLORS[i%SLICE_COLORS.length]), borderWidth:0 }] },
         options:{ responsive:false, plugins:{ legend:{ display:false } }, cutout:'65%' }
       });
     }, 50);
 
-    container.append(html(`<div style="text-align:center;font-family:Orbitron,sans-serif;font-size:22px;color:#00ff88;margin-bottom:12px">$${total.toLocaleString()}</div>`));
+    container.append(html(`<div style="text-align:center;font-family:Orbitron,sans-serif;font-size:22px;color:#00ff88;margin-bottom:12px">$${total.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</div>`));
     STATE.wallet.forEach((w) => {
       const pieIdx = pieData.findIndex(p=>p.name===w.name);
       const color  = pieIdx>=0 ? SLICE_COLORS[pieIdx%SLICE_COLORS.length] : '#64748b';
+      const usd    = walletUSD(w);
+      const sub    = w.asset ? `<div class="f10 mut" style="margin-top:1px">${w.balance} ${w.asset}${LIVE_PRICES[w.asset]?'':' (price loading…)'}</div>` : '';
       container.append(html(`
         <div class="flex-between" style="padding:8px 0;border-bottom:1px solid var(--bdr)">
           <div class="flex-gap8"><div style="width:8px;height:8px;border-radius:50%;background:${color}"></div><span class="f12">${w.name}</span></div>
-          <span class="f12" style="color:${color}">$${w.balance.toLocaleString()}</span>
+          <div style="text-align:right">
+            <span class="f12" style="color:${color}">$${usd.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</span>
+            ${sub}
+          </div>
         </div>
       `));
     });
   } else {
     // Edit mode
+    const coinOptionsHTML = ['<option value="">— fiat ($) —</option>']
+      .concat(Object.keys(CRYPTO_COINS).map(sym => `<option value="${sym}">${sym}</option>`))
+      .join('');
+
     STATE.wallet.forEach((w,i) => {
-      const row = el('div', {className:'flex-gap8', style:{marginBottom:'8px'}});
-      const dot = el('div', {style:{width:'8px',height:'8px',borderRadius:'50%',background:SLICE_COLORS[i%SLICE_COLORS.length],flexShrink:'0'}});
-      const name = el('span', {className:'f12', style:{width:'80px',flexShrink:'0',color:SLICE_COLORS[i%SLICE_COLORS.length]}}, w.name);
-      const inp  = el('input', {className:'inp wallet-inp', type:'number', value:w.balance, 'data-name':w.name});
+      const row  = el('div', {className:'flex-gap8', style:{marginBottom:'8px',flexWrap:'wrap',alignItems:'center'}});
+      const dot  = el('div', {style:{width:'8px',height:'8px',borderRadius:'50%',background:SLICE_COLORS[i%SLICE_COLORS.length],flexShrink:'0'}});
+      const name = el('span', {className:'f12', style:{width:'70px',flexShrink:'0',color:SLICE_COLORS[i%SLICE_COLORS.length]}}, w.name);
+      const inp  = el('input', {className:'inp wallet-inp', type:'number', step:'any', value:w.balance, 'data-name':w.name, style:{width:'90px',flexShrink:'0'}, title:w.asset?'Amount of '+w.asset+' held':'Balance in $'});
+      const assetSel = el('select', {className:'inp wallet-asset-sel', 'data-name':w.name, style:{width:'92px',flexShrink:'0'}});
+      assetSel.innerHTML = coinOptionsHTML;
+      assetSel.value = w.asset || '';
       const del  = el('button', {className:'btn btn-r btn-sm', style:{flexShrink:'0'}, onclick:()=>{
         api('DELETE',`/wallet/${encodeURIComponent(w.name)}`).then(()=>{
           STATE.wallet = STATE.wallet.filter(x=>x.name!==w.name);
           renderWalletBody(container, true);
         });
       }}, '✕');
-      if (STATE.wallet.length > 1) row.append(dot, name, inp, del);
-      else row.append(dot, name, inp);
+      if (STATE.wallet.length > 1) row.append(dot, name, inp, assetSel, del);
+      else row.append(dot, name, inp, assetSel);
       container.append(row);
     });
-    const addRow = el('div', {className:'flex-gap8', style:{marginTop:'8px'}});
+    container.append(html('<div class="f10 mut" style="margin:4px 0 8px">Crypto: vul het aantal coins in (bv. 0.1) en kies de coin ernaast — $-waarde wordt live berekend.</div>'));
+
+    const addRow = el('div', {className:'flex-gap8', style:{marginTop:'8px',flexWrap:'wrap'}});
     const newInp = el('input', {className:'inp', id:'new-wallet-type', placeholder:'New type (e.g. Trading...)'});
+    const newAssetSel = el('select', {className:'inp', id:'new-wallet-asset', style:{width:'92px',flexShrink:'0'}});
+    newAssetSel.innerHTML = coinOptionsHTML;
     const addBtn = el('button', {className:'btn btn-g btn-sm', onclick:()=>{
       const v = newInp.value.trim();
       if(!v) return;
-      api('POST','/wallet',{name:v}).then(()=>{ STATE.wallet.push({name:v,balance:0}); renderWalletBody(container,true); newInp.value=''; });
+      const asset = newAssetSel.value || null;
+      api('POST','/wallet',{name:v,asset}).then(()=>{
+        STATE.wallet.push({name:v,balance:0,asset});
+        refreshLivePrices();
+        renderWalletBody(container,true);
+      });
+      newInp.value=''; newAssetSel.value='';
     }}, '+ ADD');
-    addRow.append(newInp, addBtn);
+    addRow.append(newInp, newAssetSel, addBtn);
     container.append(addRow);
   }
 }
@@ -1315,6 +1380,7 @@ async function showMemberProfile(member) {
     return;
   }
 
+  await refreshLivePrices((data.wallets||[]).filter(w=>w.asset).map(w=>w.asset));
   body.innerHTML = '';
 
   // Period selector
@@ -1354,7 +1420,7 @@ async function showMemberProfile(member) {
     body.append(recsRow);
 
     // Net worth = wallet total
-    const totalBal = data.wallets.reduce((sum,w)=>sum+w.balance,0);
+    const totalBal = data.wallets.reduce((sum,w)=>sum+walletUSD(w),0);
     const nwCard = el('div', {style:{padding:'14px 16px',background:'rgba(167,139,250,.06)',border:'1px solid rgba(167,139,250,.2)',borderRadius:'12px',marginBottom:'16px',display:'flex',justifyContent:'space-between',alignItems:'center'}});
     nwCard.innerHTML = `
       <div><div class="f10 mut" style="letter-spacing:2px;margin-bottom:4px">NET WORTH</div>
@@ -1367,17 +1433,19 @@ async function showMemberProfile(member) {
     if (data.wallets.length) {
       const walletCard = el('div', {style:{padding:'16px',background:'rgba(255,255,255,.03)',border:'1px solid var(--bdr)',borderRadius:'12px',marginBottom:'16px'}});
       walletCard.innerHTML = '<div class="f11 mut" style="letter-spacing:2px;margin-bottom:12px">WALLETS</div>';
-      data.wallets.filter(w=>w.balance>=0).forEach((w,i) => {
-        const pct = totalBal>0 ? (w.balance/totalBal*100).toFixed(1) : 0;
+      data.wallets.filter(w=>walletUSD(w)>=0).forEach((w,i) => {
+        const usd = walletUSD(w);
+        const pct = totalBal>0 ? (usd/totalBal*100).toFixed(1) : 0;
         const color = SLICE_COLORS2[i%SLICE_COLORS2.length];
+        const coinLabel = w.asset ? ` <span class="f10 mut">(${w.balance} ${w.asset})</span>` : '';
         const row2 = el('div', {style:{marginBottom:'10px'}});
         row2.innerHTML = `
           <div style="display:flex;justify-content:space-between;margin-bottom:4px">
             <div style="display:flex;align-items:center;gap:6px">
               <div style="width:8px;height:8px;border-radius:50%;background:${color}"></div>
-              <span class="f12">${w.name}</span>
+              <span class="f12">${w.name}</span>${coinLabel}
             </div>
-            <span style="color:${color};font-family:Orbitron,sans-serif;font-size:12px">$${w.balance.toFixed(2)} <span class="f10 mut">${pct}%</span></span>
+            <span style="color:${color};font-family:Orbitron,sans-serif;font-size:12px">$${usd.toFixed(2)} <span class="f10 mut">${pct}%</span></span>
           </div>
           <div class="prog"><div class="prog-f" style="width:${pct}%;background:${color}"></div></div>
         `;
@@ -1722,7 +1790,7 @@ function showDepositModal() {
     if (step===1) {
       modal.innerHTML = `<div class="modal-title ng">DEPOSIT TO FUND</div><div class="modal-sub">Transfer into <span style="color:#00ff88">${STATE.group.name}</span></div>`;
       const srcSel = el('select', {className:'sel mb8'});
-      STATE.wallet.forEach(w => srcSel.append(el('option', {value:w.name}, `${w.name} — $${w.balance.toFixed(2)} available`)));
+      STATE.wallet.filter(w=>!w.asset).forEach(w => srcSel.append(el('option', {value:w.name}, `${w.name} — $${walletUSD(w).toFixed(2)} available`)));
       const amtInp = el('input', {className:'inp mb8', type:'number', placeholder:'Amount (USD)'});
       const noteInp= el('input', {className:'inp mb16', placeholder:'Reference / note (optional)'});
       const err    = el('div', {className:'err mb8'});
@@ -1732,7 +1800,7 @@ function showDepositModal() {
       const back = el('button', {className:'btn btn-o', style:{flex:'1'}, onclick:()=>overlay.remove()}, 'CANCEL');
       const next = el('button', {className:'btn btn-g', style:{flex:'2'}}, 'NEXT → PAYMENT');
       next.onclick = () => {
-        const avl = STATE.wallet.find(w=>w.name===srcSel.value)?.balance||0;
+        const avl = walletUSD(STATE.wallet.find(w=>w.name===srcSel.value)||{});
         const amt = parseFloat(amtInp.value)||0;
         if (amt<=0||amt>avl) { err.textContent=amt<=0?'Enter an amount':'Insufficient balance'; return; }
         chosenAmount=amt; chosenSource=srcSel.value;
@@ -1925,29 +1993,77 @@ function showBreakdownModal() {
 }
 
 // ─── CHAT PAGE ────────────────────────────────────────────────────────────────
+
+// Resizes + compresses a photo (screenshot, Android/iPhone camera shot, whatever)
+// down to something that fits comfortably in a JSON request before it's sent —
+// keeps a random 4000×3000 phone photo from blowing the request body limit.
+function compressImageFile(file, maxDim = 1280, quality = 0.72) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Could not read file'));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('Could not read image'));
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > maxDim || height > maxDim) {
+          if (width >= height) { height = Math.round(height * (maxDim / width)); width = maxDim; }
+          else { width = Math.round(width * (maxDim / height)); height = maxDim; }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width; canvas.height = height;
+        canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function showImageLightbox(src) {
+  const overlay = el('div', {className:'overlay', onclick:()=>overlay.remove()});
+  overlay.append(el('img', {className:'lightbox-img', src}));
+  document.body.append(overlay);
+}
+
+async function toggleSaveMessage(m) {
+  const res = await api('POST', `/messages/${m.id}/save`);
+  m.saved = res.saved ? 1 : 0;
+  renderPage();
+}
+
 function renderChatPage(container) {
   if (!STATE.group) { container.append(html('<div class="card text-center mut f13" style="padding:40px">Join a group to access chat</div>')); return; }
 
-  const card = el('div', {className:'card flex-col', style:{height:'500px'}});
+  const card = el('div', {className:'card flex-col', style:{height:'560px'}});
 
   // Header
-  card.append(html(`<div class="section-title" style="padding-bottom:12px;border-bottom:1px solid var(--bdr);margin-bottom:12px">💬 ${STATE.group.name}</div>`));
+  const header = el('div', {className:'chat-header', style:{paddingBottom:'12px',borderBottom:'1px solid var(--bdr)',marginBottom:'10px'}});
+  header.append(html(`<div class="section-title" style="border:none;padding:0;margin:0">💬 ${STATE.group.name}</div>`));
+  header.append(el('button', {className:'chat-gear-btn', title:'Chat settings', onclick:showChatSettingsModal}, '⚙'));
+  card.append(header);
+
+  // Retention info banner
+  const retention = STATE.group.retention || 'daily';
+  card.append(html(`<div class="chat-retention-banner"><span>🕒</span><span>Messages auto-delete after ${retention==='weekly'?'1 week':'1 day'} — tap 📌 to keep one forever</span></div>`));
 
   // Messages
-  const msgArea = el('div', {className:'sh flex-col', style:{flex:'1',overflowY:'auto',gap:'10px',display:'flex',flexDirection:'column'}});
+  const msgArea = el('div', {className:'sh flex-col', style:{flex:'1',overflowY:'auto',gap:'12px',display:'flex',flexDirection:'column'}});
   if (!STATE.messages.length) msgArea.append(html('<div class="text-center mut f12" style="padding-top:30px">No messages yet. Say hi! 👋</div>'));
 
-  STATE.messages.forEach(m => {
+  STATE.messages.forEach((m, i) => {
     const isMe = m.user_id === STATE.user.id;
+
     if (m.type==='poll') {
       let data; try { data=JSON.parse(m.content); } catch { return; }
       const totalVotes = (data.options||[]).reduce((s,o)=>s+(o.votes?.length||0),0);
       const pollDiv = el('div', {className:'poll-card'});
       pollDiv.innerHTML = `<div class="f11 mut mb8">${m.username} · POLL</div><div class="f13 bold mb12">${data.question}</div>`;
-      (data.options||[]).forEach((opt,i) => {
+      (data.options||[]).forEach((opt,idx) => {
         const pct = totalVotes?Math.round((opt.votes?.length||0)/totalVotes*100):0;
         const optDiv = el('div', {style:{marginBottom:'8px',cursor:'pointer'}, onclick:async()=>{
-          await api('POST',`/messages/${m.id}/vote`,{optionIdx:i});
+          await api('POST',`/messages/${m.id}/vote`,{optionIdx:idx});
           STATE.messages = await api('GET','/messages');
           renderPage();
         }});
@@ -1956,14 +2072,38 @@ function renderChatPage(container) {
       });
       pollDiv.append(html(`<div class="f11 mut mt8">${totalVotes} votes</div>`));
       msgArea.append(el('div', {}, pollDiv));
-    } else {
-      const wrap = el('div', {className:'flex-col', style:{alignItems:isMe?'flex-end':'flex-start'}});
-      if (!isMe) wrap.append(html(`<div class="sender-name">${m.username}</div>`));
-      const bubble = el('div', {className:isMe?'bubble-me':'bubble-them'});
-      bubble.innerHTML = `<div class="f13">${m.content}</div><div class="bubble-time">${new Date(m.created_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</div>`;
-      wrap.append(bubble);
-      msgArea.append(wrap);
+      return;
     }
+
+    // Only show the avatar/name on the first message of a run from the same sender.
+    const prev = STATE.messages[i-1];
+    const showHeader = !prev || prev.user_id !== m.user_id || prev.type === 'poll';
+    const member = STATE.group.members?.find(mem => mem.id === m.user_id);
+    const initials = (member?.avatar || m.username[0] || '?').toUpperCase();
+
+    const row = el('div', {className:`msg-row ${isMe?'me':''}`});
+    if (!isMe) row.append(el('div', {className:`msg-avatar ${showHeader?'':'spacer'}`}, initials));
+
+    const wrap = el('div', {className:'flex-col', style:{alignItems:isMe?'flex-end':'flex-start',maxWidth:'75%'}});
+    if (!isMe && showHeader) wrap.append(html(`<div class="sender-name">${m.username}</div>`));
+
+    const bubble = el('div', {className:`${isMe?'bubble-me':'bubble-them'}${m.saved?' saved':''}`});
+    if (m.type === 'image') {
+      const img = el('img', {className:'bubble-img', src:m.content, loading:'lazy'});
+      img.onclick = () => showImageLightbox(m.content);
+      bubble.append(img);
+    } else {
+      bubble.append(el('div', {className:'f13'}, m.content));
+    }
+    const timeRow = el('div', {className:'bubble-time'});
+    timeRow.append(el('span', {}, new Date(m.created_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})));
+    const pin = el('button', {className:`save-pin ${m.saved?'on':''}`, title:m.saved?'Saved — tap to unsave':'Save this message forever', onclick:()=>toggleSaveMessage(m)}, m.saved?'📌':'📍');
+    timeRow.append(pin);
+    bubble.append(timeRow);
+
+    wrap.append(bubble);
+    row.append(wrap);
+    msgArea.append(row);
   });
   card.append(msgArea);
 
@@ -1972,6 +2112,22 @@ function renderChatPage(container) {
 
   // Poll mode state
   let pollMode = false;
+
+  // Hidden file input reused for every "pick a photo" tap.
+  const fileInp = el('input', {type:'file', accept:'image/*', style:{display:'none'}});
+  fileInp.addEventListener('change', async () => {
+    const file = fileInp.files[0];
+    fileInp.value = '';
+    if (!file) return;
+    try {
+      const dataUrl = await compressImageFile(file);
+      const msg = await api('POST','/messages',{type:'image',content:dataUrl});
+      STATE.messages.push(msg);
+      renderPage();
+    } catch (e) {
+      toast('Could not send photo', e.message);
+    }
+  });
 
   // Input area
   const inputArea = el('div', {className:'flex-col', style:{marginTop:'12px',gap:'8px'}});
@@ -1999,6 +2155,7 @@ function renderChatPage(container) {
       inputArea.append(qInp, optsWrap, row);
     } else {
       const row   = el('div', {className:'form-row'});
+      const photo = el('button', {className:'btn btn-gh', style:{padding:'10px 12px',fontSize:'14px'}, onclick:()=>fileInp.click()}, '📷');
       const poll  = el('button', {className:'btn btn-gh', style:{padding:'10px 12px',fontSize:'14px'}, onclick:()=>{ pollMode=true; buildInputRow(); }}, '📊');
       const msgInp= el('input', {className:'inp', placeholder:'Message...'});
       const send  = el('button', {className:'btn btn-g', style:{padding:'10px 16px'}}, '→');
@@ -2007,21 +2164,70 @@ function renderChatPage(container) {
         const msg = await api('POST','/messages',{type:'text',content:msgInp.value.trim()});
         STATE.messages.push(msg);
         msgInp.value='';
-        const w = el('div', {className:'flex-col', style:{alignItems:'flex-end'}});
-        const b = el('div', {className:'bubble-me'});
-        b.innerHTML = `<div class="f13">${msg.content}</div><div class="bubble-time">${new Date(msg.created_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</div>`;
-        w.append(b); msgArea.append(w);
-        msgArea.scrollTop = msgArea.scrollHeight;
+        renderPage();
       };
       msgInp.addEventListener('keydown', e=>{ if(e.key==='Enter') doSend(); });
       send.onclick = doSend;
-      row.append(poll, msgInp, send);
+      row.append(photo, poll, msgInp, send);
       inputArea.append(row);
     }
   }
   buildInputRow();
-  card.append(inputArea);
+  card.append(inputArea, fileInp);
   container.append(card);
+}
+
+// ─── CHAT SETTINGS MODAL ───────────────────────────────────────────────────────
+function showChatSettingsModal() {
+  const overlay = el('div', {className:'overlay', onclick:e=>{ if(e.target===overlay) overlay.remove(); }});
+  const modal   = el('div', {className:'modal slide'});
+
+  modal.innerHTML = `
+    <div class="modal-title nb">CHAT SETTINGS</div>
+    <div class="modal-sub">Anyone in the group can change this — it applies to everyone's chat.</div>
+  `;
+
+  const current = STATE.group.retention || 'daily';
+  const optsRow = el('div', {style:{display:'flex',gap:'10px',marginBottom:'20px'}});
+  const dailyOpt  = el('div', {className:`retention-opt ${current==='daily'?'active':''}`});
+  dailyOpt.innerHTML = `<div class="ro-title">📆 DAILY</div><div class="ro-sub">Messages vanish after 1 day</div>`;
+  const weeklyOpt = el('div', {className:`retention-opt ${current==='weekly'?'active':''}`});
+  weeklyOpt.innerHTML = `<div class="ro-title">🗓 WEEKLY</div><div class="ro-sub">Messages vanish after 7 days</div>`;
+
+  let chosen = current;
+  const select = (val) => {
+    chosen = val;
+    dailyOpt.classList.toggle('active', val==='daily');
+    weeklyOpt.classList.toggle('active', val==='weekly');
+  };
+  dailyOpt.onclick  = () => select('daily');
+  weeklyOpt.onclick = () => select('weekly');
+  optsRow.append(dailyOpt, weeklyOpt);
+  modal.append(optsRow);
+
+  modal.append(html(`<div class="hint mb16">📌 A message pinned by anyone is kept forever — like saving a Snapchat.</div>`));
+
+  const row = el('div', {className:'form-row'});
+  const cancel = el('button', {className:'btn btn-o', style:{flex:'1'}, onclick:()=>overlay.remove()}, 'CANCEL');
+  const save   = el('button', {className:'btn btn-g', style:{flex:'2'}}, 'SAVE');
+  save.onclick = async () => {
+    if (chosen === current) { overlay.remove(); return; }
+    save.disabled = true; save.textContent = '...';
+    try {
+      await api('PUT','/groups/chat-retention',{retention:chosen});
+      STATE.group.retention = chosen;
+      toast('Chat settings saved', chosen==='weekly' ? 'Messages now last 1 week' : 'Messages now last 1 day');
+      overlay.remove();
+      renderPage();
+    } catch (e) {
+      toast('Error', e.message);
+      save.disabled = false; save.textContent = 'SAVE';
+    }
+  };
+  row.append(cancel, save);
+  modal.append(row);
+  overlay.append(modal);
+  document.body.append(overlay);
 }
 
 // ─── LEADERBOARD ──────────────────────────────────────────────────────────────
@@ -2178,13 +2384,14 @@ function renderLeaderboard(container) {
 
   // Wallet breakdown
   if (STATE.wallet.length) {
-    const totalBal = STATE.wallet.reduce((s,w)=>s+w.balance,0);
+    const totalBal = STATE.wallet.reduce((s,w)=>s+walletUSD(w),0);
     const walletRow = el('div', {style:{display:'flex',gap:'8px',flexWrap:'wrap'}});
-    STATE.wallet.filter(w=>w.balance>0).forEach((w,i) => {
+    STATE.wallet.filter(w=>walletUSD(w)>0).forEach((w,i) => {
       const color = SLICE_COLORS[i%SLICE_COLORS.length];
-      const pct = totalBal>0?(w.balance/totalBal*100).toFixed(0):0;
+      const usd = walletUSD(w);
+      const pct = totalBal>0?(usd/totalBal*100).toFixed(0):0;
       const box = el('div', {style:{flex:'1',minWidth:'80px',padding:'10px 12px',background:`rgba(${i===0?'0,255,136':i===1?'0,212,255':'167,139,250'},.06)`,border:`1px solid ${color}33`,borderRadius:'10px'}});
-      box.innerHTML = `<div class="f10 mut mb4">${w.name}</div><div style="font-family:Orbitron,sans-serif;font-size:13px;color:${color}">$${w.balance.toFixed(2)}</div><div class="f10 mut">${pct}%</div>`;
+      box.innerHTML = `<div class="f10 mut mb4">${w.name}</div><div style="font-family:Orbitron,sans-serif;font-size:13px;color:${color}">$${usd.toFixed(2)}</div><div class="f10 mut">${pct}%</div>`;
       walletRow.append(box);
     });
     myCard.append(walletRow);

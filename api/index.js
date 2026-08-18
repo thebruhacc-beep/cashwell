@@ -10,7 +10,7 @@ const routes  = require('../routes');
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '10mb' })); // raised so chat photo uploads (base64) fit
 
 // Turso schema init only needs to run once per cold start; cache the
 // promise so warm invocations skip straight to the route handler.

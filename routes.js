@@ -116,20 +116,20 @@ router.delete('/transactions/:id', requireAuth, ah(async (req, res) => {
 // ════════════════════════════════════════════════════════════════════════════
 
 router.get('/wallet', requireAuth, ah(async (req, res) => {
-  res.json(await db.prepare('SELECT name,balance FROM wallet_types WHERE user_id=?').all(req.user.id));
+  res.json(await db.prepare('SELECT name,balance,asset FROM wallet_types WHERE user_id=?').all(req.user.id));
 }));
 
 router.put('/wallet/:name', requireAuth, ah(async (req, res) => {
-  const { balance } = req.body || {};
-  await db.prepare('INSERT INTO wallet_types (user_id,name,balance) VALUES (?,?,?) ON CONFLICT(user_id,name) DO UPDATE SET balance=excluded.balance')
-    .run(req.user.id, req.params.name, Number(balance) || 0);
+  const { balance, asset } = req.body || {};
+  await db.prepare('INSERT INTO wallet_types (user_id,name,balance,asset) VALUES (?,?,?,?) ON CONFLICT(user_id,name) DO UPDATE SET balance=excluded.balance, asset=excluded.asset')
+    .run(req.user.id, req.params.name, Number(balance) || 0, asset || null);
   res.json({ ok: true });
 }));
 
 router.post('/wallet', requireAuth, ah(async (req, res) => {
-  const { name } = req.body || {};
+  const { name, asset } = req.body || {};
   if (!name) return res.status(400).json({ error: 'name required' });
-  await db.prepare('INSERT OR IGNORE INTO wallet_types (user_id,name,balance) VALUES (?,?,0)').run(req.user.id, name);
+  await db.prepare('INSERT OR IGNORE INTO wallet_types (user_id,name,balance,asset) VALUES (?,?,0,?)').run(req.user.id, name, asset || null);
   res.json({ ok: true });
 }));
 
@@ -230,6 +230,73 @@ router.put('/groups/payment', requireAuth, ah(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// Chat retention (daily/weekly auto-delete window) — any group member can change it,
+// same as anyone in a Snapchat group chat can flip the timer for everyone.
+router.put('/groups/chat-retention', requireAuth, ah(async (req, res) => {
+  const { retention } = req.body || {};
+  if (!['daily', 'weekly'].includes(retention)) return res.status(400).json({ error: 'Invalid retention value' });
+  const gid = await userGroupId(req.user.id);
+  if (!gid) return res.status(404).json({ error: 'Not in a group' });
+  await db.prepare('UPDATE groups_table SET retention=? WHERE id=?').run(retention, gid);
+  res.json({ ok: true, retention });
+}));
+
+router.get('/groups/member/:id/stats', requireAuth, ah(async (req, res) => {
+  const gid = await userGroupId(req.user.id);
+  if (!gid) return res.status(404).json({ error: 'Not in a group' });
+
+  // Only allow looking up stats for someone in your own group
+  const membership = await db.prepare('SELECT 1 FROM group_members WHERE group_id=? AND user_id=?').get(gid, req.params.id);
+  if (!membership) return res.status(404).json({ error: 'Member not found in your group' });
+
+  const txs     = await db.prepare('SELECT * FROM transactions WHERE user_id=? ORDER BY date DESC').all(req.params.id);
+  const wallets = await db.prepare('SELECT name,balance,asset FROM wallet_types WHERE user_id=?').all(req.params.id);
+
+  const today    = todayStr();
+  const weekAgo  = new Date(Date.now() - 7*24*60*60*1000).toISOString().split('T')[0];
+  const monthStr = today.slice(0, 7); // YYYY-MM
+  const yearStr  = today.slice(0, 4); // YYYY
+
+  function computeStats(list) {
+    const profit  = list.filter(t => t.amount > 0).reduce((s, t) => s + t.amount, 0);
+    const loss    = list.filter(t => t.amount < 0).reduce((s, t) => s + t.amount, 0);
+    const amounts = list.map(t => t.amount);
+    return {
+      total:   profit + loss,
+      profit,
+      loss,
+      entries: list.length,
+      best:    amounts.length ? Math.max(...amounts) : null,
+      worst:   amounts.length ? Math.min(...amounts) : null,
+    };
+  }
+
+  function categoryBreakdown(list) {
+    const map = {};
+    list.forEach(t => { map[t.category] = (map[t.category] || 0) + t.amount; });
+    return Object.entries(map)
+      .map(([name, amount]) => ({ name, amount }))
+      .sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount))
+      .slice(0, 8);
+  }
+
+  const periods = {
+    day:   txs.filter(t => t.date === today),
+    week:  txs.filter(t => t.date >= weekAgo),
+    month: txs.filter(t => t.date.startsWith(monthStr)),
+    year:  txs.filter(t => t.date.startsWith(yearStr)),
+    total: txs,
+  };
+
+  const stats = {}, categories = {};
+  for (const [key, list] of Object.entries(periods)) {
+    stats[key] = computeStats(list);
+    categories[key] = categoryBreakdown(list);
+  }
+
+  res.json({ stats, categories, wallets });
+}));
+
 // ════════════════════════════════════════════════════════════════════════════
 // DEPOSITS
 // ════════════════════════════════════════════════════════════════════════════
@@ -293,9 +360,28 @@ router.put('/deposits/:id/cancel', requireAuth, ah(async (req, res) => {
 // MESSAGES
 // ════════════════════════════════════════════════════════════════════════════
 
+// Deletes unsaved messages older than the group's retention window (1 day for
+// 'daily', 7 for 'weekly'). Called lazily on every GET /messages instead of a
+// cron job, since Vercel's serverless functions have no long-running process
+// to schedule one on — this keeps the "disappearing chat" behavior without
+// needing any extra infra.
+async function cleanupOldMessages(gid, retention) {
+  const days   = retention === 'weekly' ? 7 : 1;
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+  const stale  = await db.prepare('SELECT id FROM messages WHERE group_id=? AND saved=0 AND created_at<?').all(gid, cutoff);
+  if (!stale.length) return;
+  for (const m of stale) {
+    await db.prepare('DELETE FROM poll_votes WHERE message_id=?').run(m.id);
+  }
+  await db.prepare('DELETE FROM messages WHERE group_id=? AND saved=0 AND created_at<?').run(gid, cutoff);
+}
+
 router.get('/messages', requireAuth, ah(async (req, res) => {
   const gid = await userGroupId(req.user.id);
   if (!gid) return res.json([]);
+
+  const g = await db.prepare('SELECT retention FROM groups_table WHERE id=?').get(gid);
+  await cleanupOldMessages(gid, g?.retention || 'daily');
 
   const msgs = await db.prepare('SELECT * FROM messages WHERE group_id=? ORDER BY created_at ASC LIMIT 200').all(gid);
 
@@ -347,6 +433,18 @@ router.post('/messages/:id/vote', requireAuth, ah(async (req, res) => {
     await db.prepare('INSERT INTO poll_votes (message_id,user_id,option_idx) VALUES (?,?,?)').run(req.params.id, req.user.id, optionIdx);
   }
   res.json({ ok: true });
+}));
+
+// Toggle "keep forever" on a message — like Snapchat's save, this is visible
+// to (and togglable by) everyone in the group, not just the sender.
+router.post('/messages/:id/save', requireAuth, ah(async (req, res) => {
+  const gid = await userGroupId(req.user.id);
+  if (!gid) return res.status(403).json({ error: 'Not in a group' });
+  const msg = await db.prepare('SELECT * FROM messages WHERE id=? AND group_id=?').get(req.params.id, gid);
+  if (!msg) return res.status(404).json({ error: 'Message not found' });
+  const saved = msg.saved ? 0 : 1;
+  await db.prepare('UPDATE messages SET saved=? WHERE id=?').run(saved, msg.id);
+  res.json({ ok: true, saved: !!saved });
 }));
 
 module.exports = router;

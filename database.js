@@ -67,6 +67,7 @@ async function initDb() {
       admin_id   TEXT NOT NULL,
       paypal     TEXT DEFAULT '',
       pay_note   TEXT DEFAULT '',
+      retention  TEXT DEFAULT 'daily',
       created_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS group_members (
@@ -89,6 +90,7 @@ async function initDb() {
       user_id TEXT NOT NULL,
       name    TEXT NOT NULL,
       balance REAL DEFAULT 0,
+      asset   TEXT DEFAULT NULL,
       PRIMARY KEY (user_id, name)
     );
     CREATE TABLE IF NOT EXISTS categories (
@@ -118,6 +120,7 @@ async function initDb() {
       username   TEXT NOT NULL,
       type       TEXT NOT NULL DEFAULT 'text',
       content    TEXT NOT NULL,
+      saved      INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS poll_votes (
@@ -127,6 +130,30 @@ async function initDb() {
       PRIMARY KEY (message_id, user_id)
     );
   `);
+
+  // Migration for databases created before the `asset` column existed
+  // (CREATE TABLE IF NOT EXISTS above won't add it to an existing table).
+  try {
+    await client.execute('ALTER TABLE wallet_types ADD COLUMN asset TEXT DEFAULT NULL');
+    console.log('🔧 Migrated: added wallet_types.asset column');
+  } catch (e) {
+    // Already exists — fine, ignore.
+  }
+
+  // Migration for databases created before chat retention / saved messages existed.
+  try {
+    await client.execute("ALTER TABLE groups_table ADD COLUMN retention TEXT DEFAULT 'daily'");
+    console.log('🔧 Migrated: added groups_table.retention column');
+  } catch (e) {
+    // Already exists — fine, ignore.
+  }
+  try {
+    await client.execute('ALTER TABLE messages ADD COLUMN saved INTEGER NOT NULL DEFAULT 0');
+    console.log('🔧 Migrated: added messages.saved column');
+  } catch (e) {
+    // Already exists — fine, ignore.
+  }
+
   console.log('✅ Database ready');
 }
 
