@@ -485,4 +485,68 @@ router.delete('/todos/:id', requireAuth, ah(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// ════════════════════════════════════════════════════════════════════════════
+// MARKET QUOTES — free, keyless live-price lookup for the Risk Management tool.
+// Crypto prices are fetched client-side straight from CoinGecko (like the rest
+// of the app already does). Gold/indices/forex don't have a keyless client-side
+// option with CORS support, so this proxies them server-side: Yahoo Finance's
+// public chart endpoint first, falling back to Stooq's CSV quote feed if Yahoo
+// is unreachable or blocks the request.
+// ════════════════════════════════════════════════════════════════════════════
+
+const YAHOO_SYMBOL_MAP = {
+  XAUUSD: 'XAUUSD=X', XAGUSD: 'XAGUSD=X',
+  NAS100: '^NDX', US500: '^GSPC', US30: '^DJI', GER40: '^GDAXI', UK100: '^FTSE',
+  EURUSD: 'EURUSD=X', GBPUSD: 'GBPUSD=X', USDJPY: 'USDJPY=X', AUDUSD: 'AUDUSD=X', USDCAD: 'USDCAD=X',
+  USOIL: 'CL=F', UKOIL: 'BZ=F',
+};
+const STOOQ_SYMBOL_MAP = {
+  XAUUSD: 'xauusd', XAGUSD: 'xagusd',
+  NAS100: '^ndx', US500: '^spx', US30: '^dji', GER40: '^dax', UK100: '^ukx',
+  EURUSD: 'eurusd', GBPUSD: 'gbpusd', USDJPY: 'usdjpy', AUDUSD: 'audusd', USDCAD: 'usdcad',
+  USOIL: 'cl.f', UKOIL: 'bz.f',
+};
+
+async function fetchYahooPrice(ticker) {
+  const r = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}`, {
+    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; NeonFinance/1.0)' },
+  });
+  if (!r.ok) throw new Error('Yahoo request failed');
+  const data  = await r.json();
+  const price = data?.chart?.result?.[0]?.meta?.regularMarketPrice;
+  if (typeof price !== 'number') throw new Error('No price in Yahoo response');
+  return price;
+}
+
+async function fetchStooqPrice(ticker) {
+  const r = await fetch(`https://stooq.com/q/l/?s=${encodeURIComponent(ticker)}&f=sd2t2ohlc&h&e=csv`);
+  if (!r.ok) throw new Error('Stooq request failed');
+  const csv  = await r.text();
+  const rows = csv.trim().split('\n');
+  if (rows.length < 2) throw new Error('No Stooq data');
+  const cols  = rows[1].split(',');
+  const close = parseFloat(cols[6]); // Symbol,Date,Time,Open,High,Low,Close
+  if (!isFinite(close) || close <= 0) throw new Error('No price in Stooq response');
+  return close;
+}
+
+router.get('/market/quote', requireAuth, ah(async (req, res) => {
+  const symbol = String(req.query.symbol || '').toUpperCase();
+  const yahooTicker = YAHOO_SYMBOL_MAP[symbol];
+  const stooqTicker = STOOQ_SYMBOL_MAP[symbol];
+  if (!yahooTicker) return res.status(400).json({ error: 'Unknown symbol' });
+
+  try {
+    const price = await fetchYahooPrice(yahooTicker);
+    return res.json({ symbol, price, source: 'yahoo' });
+  } catch (e) {
+    try {
+      const price = await fetchStooqPrice(stooqTicker);
+      return res.json({ symbol, price, source: 'stooq' });
+    } catch (e2) {
+      return res.status(502).json({ error: 'Live price unavailable right now — enter it manually.' });
+    }
+  }
+}));
+
 module.exports = router;

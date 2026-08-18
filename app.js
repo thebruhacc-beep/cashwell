@@ -61,6 +61,7 @@ const NAV_ITEMS    = [
   {id:'chat',       icon:'◇', label:'Chat'},
   {id:'leaderboard',icon:'◆', label:'Rankings'},
   {id:'insights',   icon:'◐', label:'AI Insights'},
+  {id:'tools',      icon:'▣', label:'Tools'},
   {id:'settings',   icon:'⚙', label:'Settings'},
 ];
 
@@ -604,6 +605,7 @@ function renderPage() {
     chat:        renderChatPage,
     leaderboard: renderLeaderboard,
     insights:    renderInsights,
+    tools:       renderToolsPage,
     settings:    renderSettings,
   };
   const fn = pages[STATE.page];
@@ -2693,7 +2695,306 @@ function renderInsights(container) {
   container.append(card);
 }
 
-// ─── SETTINGS ────────────────────────────────────────────────────────────────
+// ─── TOOLS HUB ───────────────────────────────────────────────────────────────
+let activeTool = null; // null = hub grid, otherwise the tool's id
+
+function renderToolsPage(container) {
+  if (activeTool === 'risk') { renderRiskTool(container); return; }
+
+  const wrap = el('div', {className:'flex-col', style:{gap:'20px'}});
+  wrap.append(html('<div class="mut f12" style="max-width:640px">Handy standalone calculators and utilities — nothing here touches your transactions or balance unless you tell it to.</div>'));
+
+  const grid = el('div', {className:'tool-grid'});
+
+  const riskCard = el('div', {className:'tool-card', onclick:()=>{ activeTool='risk'; renderPage(); }});
+  riskCard.innerHTML = `
+    <div class="tool-icon">🎯</div>
+    <div class="tool-name">Risk Management</div>
+    <div class="tool-desc">Position size from your balance, risk % and stop loss — with live prices for gold, indices, forex and crypto.</div>
+  `;
+  grid.append(riskCard);
+
+  grid.append(html(`
+    <div class="tool-card soon">
+      <div class="tool-icon">➕</div>
+      <div class="tool-name">More tools coming</div>
+      <div class="tool-desc">Got an idea for a handy trading tool? Just ask and it'll show up here.</div>
+    </div>
+  `));
+
+  wrap.append(grid);
+  container.append(wrap);
+}
+
+// ─── RISK MANAGEMENT TOOL ───────────────────────────────────────────────────────
+const RISK_INSTRUMENTS = [
+  {key:'XAUUSD', label:'Gold (XAUUSD)',        group:'Metals',  contract:100},
+  {key:'XAGUSD', label:'Silver (XAGUSD)',      group:'Metals',  contract:5000},
+  {key:'NAS100', label:'Nasdaq 100 (NAS100)',  group:'Indices', contract:1},
+  {key:'US500',  label:'S&P 500 (US500)',      group:'Indices', contract:1},
+  {key:'US30',   label:'Dow Jones (US30)',     group:'Indices', contract:1},
+  {key:'GER40',  label:'DAX 40 (GER40)',       group:'Indices', contract:1},
+  {key:'UK100',  label:'FTSE 100 (UK100)',     group:'Indices', contract:1},
+  {key:'EURUSD', label:'EUR/USD',              group:'Forex',   contract:100000},
+  {key:'GBPUSD', label:'GBP/USD',              group:'Forex',   contract:100000},
+  {key:'USDJPY', label:'USD/JPY',              group:'Forex',   contract:100000},
+  {key:'AUDUSD', label:'AUD/USD',              group:'Forex',   contract:100000},
+  {key:'USDCAD', label:'USD/CAD',              group:'Forex',   contract:100000},
+  {key:'USOIL',  label:'Crude Oil WTI (USOIL)',group:'Energy',  contract:1000},
+  {key:'UKOIL',  label:'Brent Oil (UKOIL)',    group:'Energy',  contract:1000},
+];
+
+let riskState = {
+  balance: 1000,
+  riskPct: 1,
+  mode: 'preset',          // 'preset' | 'crypto' | 'custom'
+  instrumentKey: 'XAUUSD',
+  instrumentLabel: 'Gold (XAUUSD)',
+  contractSize: 100,
+  openPrice: '',
+  stopLoss: '',
+  takeProfit: '',
+  cryptoQuery: '',
+  cryptoResults: [],
+};
+
+function riskCalc() {
+  const balance  = parseFloat(riskState.balance)  || 0;
+  const riskPct  = parseFloat(riskState.riskPct)  || 0;
+  const open     = parseFloat(riskState.openPrice);
+  const sl       = parseFloat(riskState.stopLoss);
+  const tp       = riskState.takeProfit !== '' ? parseFloat(riskState.takeProfit) : null;
+  const contract = parseFloat(riskState.contractSize) || 0;
+
+  if (!balance || !riskPct || !isFinite(open) || !isFinite(sl) || !contract || open === sl) return null;
+
+  const direction = open > sl ? 'LONG' : 'SHORT';
+  const riskAmount = balance * (riskPct / 100);
+  const slDistance = Math.abs(open - sl);
+  const lots  = riskAmount / (slDistance * contract);
+  const units = lots * contract;
+
+  let tpInfo = null;
+  if (tp !== null && isFinite(tp) && tp !== open) {
+    const tpDistance = Math.abs(tp - open);
+    const potentialProfit = lots * tpDistance * contract;
+    const rr = tpDistance / slDistance;
+    const directionValid = direction === 'LONG' ? tp > open : tp < open;
+    tpInfo = { potentialProfit, rr, directionValid };
+  }
+
+  return { direction, riskAmount, lots, units, tpInfo };
+}
+
+function riskMarkOutcome(win) {
+  const r = riskCalc();
+  if (!r) return;
+  const balance = parseFloat(riskState.balance) || 0;
+  if (win && r.tpInfo) {
+    riskState.balance = +(balance + r.tpInfo.potentialProfit).toFixed(2);
+    toast('Marked as WIN', `Balance updated to $${riskState.balance.toFixed(2)}`);
+  } else if (!win) {
+    riskState.balance = +(balance - r.riskAmount).toFixed(2);
+    toast('Marked as LOSS', `Balance updated to $${riskState.balance.toFixed(2)}`);
+  } else {
+    return; // "win" pressed without a TP set — nothing to apply
+  }
+  riskState.openPrice = '';
+  riskState.stopLoss  = '';
+  riskState.takeProfit = '';
+  renderPage();
+}
+
+async function riskFetchPresetPrice(btn) {
+  const orig = btn.textContent;
+  btn.textContent = '...'; btn.disabled = true;
+  try {
+    const res = await api('GET', `/market/quote?symbol=${riskState.instrumentKey}`);
+    riskState.openPrice = res.price;
+    toast('Live price fetched', `${riskState.instrumentKey}: ${res.price}`);
+    renderPage();
+  } catch (e) {
+    toast('Could not fetch live price', 'Enter it manually instead.');
+  } finally {
+    btn.textContent = orig; btn.disabled = false;
+  }
+}
+
+let cryptoSearchTimer;
+function riskSearchCrypto(query, resultsBox) {
+  clearTimeout(cryptoSearchTimer);
+  riskState.cryptoQuery = query;
+  if (!query.trim()) { riskState.cryptoResults = []; resultsBox.innerHTML=''; return; }
+  cryptoSearchTimer = setTimeout(async () => {
+    try {
+      const r = await fetch(`https://api.coingecko.com/api/v3/search?query=${encodeURIComponent(query)}`);
+      const data = await r.json();
+      riskState.cryptoResults = (data.coins || []).slice(0, 8);
+      renderCryptoResults(resultsBox);
+    } catch (e) { /* silent — search is a convenience, not critical */ }
+  }, 400);
+}
+
+function renderCryptoResults(resultsBox) {
+  resultsBox.innerHTML = '';
+  riskState.cryptoResults.forEach(coin => {
+    const item = el('div', {className:'crypto-result', onclick: async () => {
+      riskState.instrumentKey = coin.id;
+      riskState.instrumentLabel = `${coin.name} (${coin.symbol.toUpperCase()})`;
+      riskState.contractSize = 1;
+      riskState.cryptoQuery = '';
+      riskState.cryptoResults = [];
+      try {
+        const r = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${coin.id}&vs_currencies=usd`);
+        const data = await r.json();
+        if (data[coin.id]?.usd !== undefined) riskState.openPrice = data[coin.id].usd;
+      } catch (e) {}
+      renderPage();
+    }});
+    item.innerHTML = `<span>${coin.name}</span><span class="mut f11">${coin.symbol.toUpperCase()}</span>`;
+    resultsBox.append(item);
+  });
+}
+
+function renderRiskTool(container) {
+  const wrap = el('div', {className:'flex-col', style:{gap:'20px'}});
+
+  const backBtn = el('button', {className:'btn btn-gh btn-sm', onclick:()=>{ activeTool=null; renderPage(); }}, '← BACK TO TOOLS');
+  wrap.append(backBtn);
+
+  const card = el('div', {className:'card'});
+  card.append(html('<div class="section-title mb16">🎯 RISK MANAGEMENT</div>'));
+
+  // Mode tabs
+  const tabs = el('div', {className:'ptabs mb16'});
+  [['preset','Popular'],['crypto','Crypto'],['custom','Custom']].forEach(([m,label]) => {
+    const b = el('button', {className:`ptab ${riskState.mode===m?'active':''}`, onclick:()=>{ riskState.mode=m; renderPage(); }}, label);
+    tabs.append(b);
+  });
+  card.append(tabs);
+
+  // Instrument picker
+  if (riskState.mode === 'preset') {
+    const row = el('div', {className:'form-row mb16'});
+    const sel = el('select', {className:'inp'});
+    const groups = [...new Set(RISK_INSTRUMENTS.map(i=>i.group))];
+    groups.forEach(g => {
+      const og = el('optgroup', {label:g});
+      RISK_INSTRUMENTS.filter(i=>i.group===g).forEach(i => {
+        const opt = el('option', {value:i.key}, i.label);
+        if (i.key === riskState.instrumentKey) opt.selected = true;
+        og.append(opt);
+      });
+      sel.append(og);
+    });
+    sel.onchange = () => {
+      const inst = RISK_INSTRUMENTS.find(i=>i.key===sel.value);
+      riskState.instrumentKey = inst.key;
+      riskState.instrumentLabel = inst.label;
+      riskState.contractSize = inst.contract;
+      renderPage();
+    };
+    const fetchBtn = el('button', {className:'btn btn-gh', onclick:(e)=>riskFetchPresetPrice(e.target)}, '⚡ Fetch Live Price');
+    row.append(sel, fetchBtn);
+    card.append(row);
+  } else if (riskState.mode === 'crypto') {
+    const searchWrap = el('div', {className:'flex-col mb16', style:{gap:'8px'}});
+    const searchInp = el('input', {className:'inp', placeholder:'Search any coin — e.g. Solana, Pepe, Chainlink...', value:riskState.cryptoQuery});
+    const resultsBox = el('div', {className:'crypto-results'});
+    searchInp.addEventListener('input', () => riskSearchCrypto(searchInp.value, resultsBox));
+    searchWrap.append(searchInp, resultsBox);
+    if (riskState.instrumentKey && riskState.mode==='crypto' && riskState.contractSize===1 && riskState.instrumentLabel) {
+      searchWrap.append(html(`<div class="f12" style="color:var(--b)">Selected: ${riskState.instrumentLabel}</div>`));
+    }
+    card.append(searchWrap);
+  } else {
+    const row = el('div', {className:'form-row mb16'});
+    const nameInp = el('input', {className:'inp', placeholder:'Instrument name (e.g. My Broker CFD)', value:riskState.instrumentLabel==='Gold (XAUUSD)'?'':riskState.instrumentLabel});
+    nameInp.oninput = () => { riskState.instrumentLabel = nameInp.value; };
+    row.append(nameInp);
+    card.append(row);
+  }
+
+  // Contract size (always editable — varies by broker)
+  const csRow = el('div', {className:'flex-col mb16', style:{gap:'6px'}});
+  csRow.append(html('<div class="label">CONTRACT SIZE (per 1.00 lot)</div>'));
+  const csInp = el('input', {className:'inp', type:'number', step:'any', value:riskState.contractSize});
+  csInp.oninput = () => { riskState.contractSize = csInp.value; updateRiskResults(resultsPanel); };
+  csRow.append(csInp);
+  csRow.append(html('<div class="f10 mut">Default for MT5 — this varies per broker, double-check your contract specification.</div>'));
+  card.append(csRow);
+
+  // Balance / Risk% / Open / SL / TP grid
+  const inputsGrid = el('div', {className:'g2', style:{gap:'14px'}});
+
+  function field(labelText, key, placeholder, opts={}) {
+    const col = el('div', {className:'flex-col', style:{gap:'6px'}});
+    col.append(html(`<div class="label">${labelText}</div>`));
+    const inp = el('input', {className:'inp', type:'number', step:'any', placeholder, value: riskState[key]});
+    inp.oninput = () => { riskState[key] = inp.value; updateRiskResults(resultsPanel); };
+    col.append(inp);
+    if (opts.hint) col.append(html(`<div class="f10 mut">${opts.hint}</div>`));
+    return col;
+  }
+
+  inputsGrid.append(field('BALANCE ($)', 'balance', '1000'));
+  inputsGrid.append(field('RISK %', 'riskPct', '1'));
+  inputsGrid.append(field('OPENING PRICE', 'openPrice', '0.00'));
+  inputsGrid.append(field('STOP LOSS', 'stopLoss', '0.00'));
+  inputsGrid.append(field('TAKE PROFIT (optional)', 'takeProfit', '0.00', {hint:'Set this to unlock pending profit + win/loss tracking below.'}));
+  card.append(inputsGrid);
+
+  const resultsPanel = el('div', {style:{marginTop:'18px'}});
+  card.append(resultsPanel);
+  updateRiskResults(resultsPanel);
+
+  wrap.append(card);
+  container.append(wrap);
+}
+
+function updateRiskResults(panel) {
+  panel.innerHTML = '';
+  const r = riskCalc();
+  if (!r) {
+    panel.append(html('<div class="mut f12" style="padding:16px 0">Fill in balance, risk %, opening price and stop loss to calculate your position size.</div>'));
+    return;
+  }
+
+  const box = el('div', {className:'card', style:{background:'rgba(0,212,255,.04)', borderColor:'rgba(0,212,255,.2)'}});
+  const dirColor = r.direction === 'LONG' ? '#00ff88' : '#ff3366';
+  box.innerHTML = `
+    <div class="flex-between mb16">
+      <div style="font-family:Orbitron,sans-serif;font-size:13px;letter-spacing:2px;color:${dirColor}">${r.direction}</div>
+      <div class="f11 mut">${riskState.instrumentLabel || riskState.instrumentKey}</div>
+    </div>
+    <div class="g2" style="gap:16px">
+      <div><div class="f11 mut" style="letter-spacing:1px">POSITION SIZE</div><div style="font-family:Orbitron,sans-serif;font-size:20px;color:#00d4ff">${r.lots.toFixed(3)} lots</div><div class="f11 mut mt4">${r.units.toLocaleString(undefined,{maximumFractionDigits:2})} units</div></div>
+      <div><div class="f11 mut" style="letter-spacing:1px">RISK AMOUNT</div><div style="font-family:Orbitron,sans-serif;font-size:20px" class="nr">-$${r.riskAmount.toFixed(2)}</div></div>
+    </div>
+  `;
+
+  if (r.tpInfo) {
+    const tpBox = el('div', {className:'mt16', style:{paddingTop:'16px',borderTop:'1px solid var(--bdr)'}});
+    tpBox.innerHTML = `
+      <div class="g2" style="gap:16px">
+        <div><div class="f11 mut" style="letter-spacing:1px">PENDING (IF TP HITS)</div><div style="font-family:Orbitron,sans-serif;font-size:20px" class="ng">+$${r.tpInfo.potentialProfit.toFixed(2)}</div></div>
+        <div><div class="f11 mut" style="letter-spacing:1px">RISK : REWARD</div><div style="font-family:Orbitron,sans-serif;font-size:20px;color:#bf5fff">1 : ${r.tpInfo.rr.toFixed(2)}</div></div>
+      </div>
+      ${!r.tpInfo.directionValid ? '<div class="f11 mt8" style="color:#ffe600">⚠ Your TP is on the wrong side of entry for a ' + r.direction + ' position — double check it.</div>' : ''}
+    `;
+    const btnRow = el('div', {className:'form-row mt16'});
+    const winBtn  = el('button', {className:'btn btn-g',  style:{flex:'1'}, onclick:()=>riskMarkOutcome(true)},  '✅ MARK AS WIN');
+    const lossBtn = el('button', {className:'btn btn-r',  style:{flex:'1'}, onclick:()=>riskMarkOutcome(false)}, '❌ MARK AS LOSS');
+    btnRow.append(winBtn, lossBtn);
+    tpBox.append(btnRow);
+    tpBox.append(html('<div class="f10 mut mt8">Marking an outcome updates your balance above so the next trade\'s position size is calculated from your new balance.</div>'));
+    box.append(tpBox);
+  }
+
+  panel.append(box);
+}
+
+
 function renderSettings(container) {
   const col = el('div', {className:'flex-col', style:{gap:'20px'}});
 
