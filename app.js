@@ -12,6 +12,7 @@ const STATE = {
   group:        null,
   deposits:     [],
   messages:     [],
+  todos:        [],
   charts:       {},   // chart.js instances keyed by canvas id
 };
 
@@ -53,6 +54,7 @@ function walletUSD(w) {
 }
 const NAV_ITEMS    = [
   {id:'dashboard',  icon:'◈', label:'Dashboard'},
+  {id:'calendar',   icon:'▦', label:'Calendar'},
   {id:'charts',     icon:'◉', label:'Charts'},
   {id:'wallet',     icon:'◎', label:'Wallet'},
   {id:'groups',     icon:'◈', label:'Group Fund'},
@@ -320,13 +322,14 @@ async function pollForUpdates() {
 
 // ─── DATA LOADING ─────────────────────────────────────────────────────────────
 async function loadAll() {
-  const [txns, wal, cats, grp, deps, msgs] = await Promise.all([
+  const [txns, wal, cats, grp, deps, msgs, todos] = await Promise.all([
     api('GET', '/transactions'),
     api('GET', '/wallet'),
     api('GET', '/categories'),
     api('GET', '/groups/mine'),
     api('GET', '/deposits'),
     api('GET', '/messages'),
+    api('GET', '/todos'),
   ]);
   STATE.transactions = txns;
   STATE.wallet       = wal;
@@ -334,6 +337,7 @@ async function loadAll() {
   STATE.group        = grp;
   STATE.deposits     = deps;
   STATE.messages     = msgs;
+  STATE.todos        = todos;
 }
 
 // ─── AUTH ─────────────────────────────────────────────────────────────────────
@@ -593,6 +597,7 @@ function renderPage() {
   // Render correct page
   const pages = {
     dashboard:   renderDashboard,
+    calendar:    renderCalendarPage,
     charts:      renderCharts,
     wallet:      renderWalletPage,
     groups:      renderGroupsPage,
@@ -984,6 +989,179 @@ function buildHeatmap() {
   `));
   return card;
 }
+
+// ─── CALENDAR PAGE (monthly money heatmap + todo sidebar) ─────────────────────
+function renderCalendarPage(container) {
+  const row = el('div', {className:'g2-todo'});
+  try { row.append(buildMonthCalendar()); } catch(e) { console.error('MonthCalendar error',e); }
+  try { row.append(buildTodoCard()); } catch(e) { console.error('TodoCard error',e); }
+  container.append(row);
+}
+
+function buildMonthCalendar() {
+  const now = new Date();
+  const year = now.getFullYear(), month = now.getMonth(); // 0-indexed
+  const monthLabel = now.toLocaleDateString('en-US', {month:'long', year:'numeric'});
+  const daysInMonth = new Date(year, month+1, 0).getDate();
+  const firstWeekday = (new Date(year, month, 1).getDay() + 6) % 7; // Monday=0
+
+  // Sum every transaction into its day (all-time, so we can find the all-time
+  // record) and separately track just this month's days.
+  const dayTotals = {};
+  STATE.transactions.forEach(t => { if (t.date) dayTotals[t.date] = (dayTotals[t.date]||0) + t.amount; });
+
+  const monthKeys = Object.keys(dayTotals).filter(k => k.slice(0,7) === `${year}-${String(month+1).padStart(2,'0')}`);
+  const monthTotal = monthKeys.reduce((s,k) => s + dayTotals[k], 0);
+
+  // Average is based on this month's PROFIT days only — that's the "normal good day" baseline.
+  const profitVals = monthKeys.map(k => dayTotals[k]).filter(v => v > 0);
+  const avg = profitVals.length ? profitVals.reduce((a,b)=>a+b,0) / profitVals.length : 0;
+
+  // All-time single-day record (across every transaction ever), used for the crown.
+  const allVals = Object.values(dayTotals);
+  const allTimeBest = allVals.length ? Math.max(...allVals) : null;
+
+  const card = el('div', {className:'card'});
+  const header = el('div', {className:'flex-between mb16', style:{flexWrap:'wrap',gap:'8px'}});
+  header.append(html(`<div class="section-title" style="margin:0">${monthLabel.toUpperCase()} HEATMAP</div>`));
+  header.append(html(`<div style="font-family:Orbitron,sans-serif;font-size:20px" class="${monthTotal>=0?'ng':'nr'}">${fmt(monthTotal)}<span class="f10 mut" style="margin-left:6px;letter-spacing:1px">MONTH TOTAL</span></div>`));
+  card.append(header);
+
+  // Weekday header row
+  const wdRow = el('div', {className:'cal-grid mb8'});
+  ['MON','TUE','WED','THU','FRI','SAT','SUN'].forEach(d => wdRow.append(html(`<div class="cal-weekday">${d}</div>`)));
+  card.append(wdRow);
+
+  const grid = el('div', {className:'cal-grid'});
+  const info = el('div', {style:{marginTop:'12px',fontSize:'12px',minHeight:'18px'}});
+
+  // Leading empty cells so day 1 lands on the right weekday column.
+  for (let i=0;i<firstWeekday;i++) grid.append(el('div', {className:'cal-day empty'}));
+
+  for (let day=1; day<=daysInMonth; day++) {
+    const key = `${year}-${String(month+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+    const val = dayTotals[key] || 0;
+    const isRecord = allTimeBest !== null && val === allTimeBest && val > 0;
+    const isFuture = key > todayStr();
+
+    let cls = 'cal-day';
+    let statusLabel = '';
+    if (isFuture) {
+      cls += ' future';
+    } else if (val === 0) {
+      cls += ' empty';
+    } else if (val < 0) {
+      cls += ' loss';
+      statusLabel = '🔴 Loss';
+    } else {
+      const ratio = avg > 0 ? val / avg : 1;
+      if (ratio > 1.15) { cls += ' impressive'; statusLabel = `🔵 ${Math.round((ratio-1)*100)}% above your average`; }
+      else if (ratio < 0.85) { cls += ' below'; statusLabel = '🟡 Below your average'; }
+      else { cls += ' onavg'; statusLabel = '🟢 Around your average'; }
+    }
+
+    const cell = el('div', {className:cls});
+    if (isRecord) cell.append(el('div', {className:'cal-crown', title:'All-time record day'}, '👑'));
+    cell.append(el('div', {className:'cal-day-num'}, String(day)));
+    if (val !== 0 && !isFuture) cell.append(el('div', {className:'cal-day-amt'}, `${val>0?'+':''}${Math.round(val)}`));
+
+    if (!isFuture && val !== 0) {
+      cell.onmouseenter = () => {
+        info.innerHTML = `<b>${key}</b> — <span style="color:${val>0?'#00ff88':'#ff3366'}">${fmt(val)}</span>${statusLabel?` &nbsp;·&nbsp; ${statusLabel}`:''}`;
+      };
+      cell.onmouseleave = () => { info.textContent = ''; };
+    }
+    grid.append(cell);
+  }
+
+  card.append(grid, info);
+  card.append(html(`
+    <div class="flex-gap8 mt16 f11 mut" style="flex-wrap:wrap">
+      <span>● <span style="color:#ffe600">Below average</span></span>
+      <span>● <span style="color:#00ff88">Average</span></span>
+      <span>● <span style="color:#00d4ff">Impressive</span></span>
+      <span>● <span style="color:#ff3366">Loss</span></span>
+      <span>👑 All-time record day</span>
+    </div>
+  `));
+  return card;
+}
+
+// ─── TODO SIDEBAR ───────────────────────────────────────────────────────────────
+function buildTodoCard() {
+  const card = el('div', {className:'card'});
+  card.append(html('<div class="section-title mb16">TODO LIST</div>'));
+
+  const addRow = el('div', {className:'form-row mb16'});
+  const addInp = el('input', {className:'inp', placeholder:'Add a task...'});
+  const addBtn = el('button', {className:'btn btn-g btn-sm'}, '+');
+  const doAdd = async () => {
+    const text = addInp.value.trim();
+    if (!text) return;
+    addInp.value = '';
+    addInp.focus();
+    try {
+      const t = await api('POST','/todos',{text});
+      STATE.todos.push(t);
+      renderPage();
+    } catch(e) { toast('Error', e.message); }
+  };
+  addInp.addEventListener('keydown', e => { if (e.key==='Enter') doAdd(); });
+  addBtn.onclick = doAdd;
+  addRow.append(addInp, addBtn);
+  card.append(addRow);
+
+  const list = el('div', {className:'flex-col', style:{gap:'6px'}});
+  if (!STATE.todos.length) {
+    list.append(html('<div class="text-center mut f12" style="padding:20px 0">No tasks yet — add one above 👆</div>'));
+  }
+
+  STATE.todos.forEach(t => {
+    const item = el('div', {className:`todo-item ${t.done?'done':''}`});
+
+    const check = el('button', {className:`todo-check ${t.done?'on':''}`, onclick: async () => {
+      t.done = t.done ? 0 : 1;
+      renderPage();
+      try { await api('PUT',`/todos/${t.id}`,{done: !!t.done}); }
+      catch(e) { t.done = t.done ? 0 : 1; toast('Error', e.message); renderPage(); }
+    }}, t.done ? '✓' : '');
+
+    const text = el('div', {className:'todo-text', contentEditable:'true', spellcheck:'false'}, t.text);
+    text.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); text.blur(); }
+      if (e.key === 'Escape') { text.textContent = t.text; text.blur(); }
+    });
+    text.addEventListener('blur', async () => {
+      const newText = text.textContent.trim();
+      if (!newText) { text.textContent = t.text; return; }
+      if (newText === t.text) return;
+      const old = t.text;
+      t.text = newText;
+      try { await api('PUT',`/todos/${t.id}`,{text:newText}); }
+      catch(e) { t.text = old; text.textContent = old; toast('Error', e.message); }
+    });
+
+    const del = el('button', {className:'todo-del', title:'Delete', onclick: async () => {
+      const idx = STATE.todos.findIndex(x=>x.id===t.id);
+      if (idx>-1) STATE.todos.splice(idx,1);
+      renderPage();
+      try { await api('DELETE',`/todos/${t.id}`); }
+      catch(e) { STATE.todos.splice(idx,0,t); toast('Error', e.message); renderPage(); }
+    }}, '✕');
+
+    item.append(check, text, del);
+    list.append(item);
+  });
+  card.append(list);
+
+  if (STATE.todos.length) {
+    const doneCount = STATE.todos.filter(t=>t.done).length;
+    card.append(html(`<div class="f10 mut mt12" style="letter-spacing:1px">${doneCount}/${STATE.todos.length} DONE</div>`));
+  }
+
+  return card;
+}
+
 
 // ─── TRANSACTION LIST ─────────────────────────────────────────────────────────
 let txFilter = 'all';

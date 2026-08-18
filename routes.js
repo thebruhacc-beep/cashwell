@@ -447,4 +447,42 @@ router.post('/messages/:id/save', requireAuth, ah(async (req, res) => {
   res.json({ ok: true, saved: !!saved });
 }));
 
+// ════════════════════════════════════════════════════════════════════════════
+// TODOS — simple personal todo list (sidebar widget on the Calendar page)
+// ════════════════════════════════════════════════════════════════════════════
+
+router.get('/todos', requireAuth, ah(async (req, res) => {
+  const rows = await db.prepare('SELECT * FROM todos WHERE user_id=? ORDER BY position ASC, created_at ASC').all(req.user.id);
+  res.json(rows);
+}));
+
+router.post('/todos', requireAuth, ah(async (req, res) => {
+  const { text } = req.body || {};
+  if (!text || !text.trim()) return res.status(400).json({ error: 'text is required' });
+  const id = uuidv4();
+  const last = await db.prepare('SELECT MAX(position) AS m FROM todos WHERE user_id=?').get(req.user.id);
+  const position = (last?.m ?? -1) + 1;
+  await db.prepare('INSERT INTO todos (id,user_id,text,done,position,created_at) VALUES (?,?,?,0,?,?)')
+    .run(id, req.user.id, text.trim(), position, now());
+  res.json(await db.prepare('SELECT * FROM todos WHERE id=?').get(id));
+}));
+
+router.put('/todos/:id', requireAuth, ah(async (req, res) => {
+  const todo = await db.prepare('SELECT * FROM todos WHERE id=? AND user_id=?').get(req.params.id, req.user.id);
+  if (!todo) return res.status(404).json({ error: 'Todo not found' });
+  const { text, done } = req.body || {};
+  const newText = text !== undefined ? String(text).trim() : todo.text;
+  const newDone = done !== undefined ? (done ? 1 : 0) : todo.done;
+  if (text !== undefined && !newText) return res.status(400).json({ error: 'text cannot be empty' });
+  await db.prepare('UPDATE todos SET text=?, done=? WHERE id=?').run(newText, newDone, todo.id);
+  res.json(await db.prepare('SELECT * FROM todos WHERE id=?').get(todo.id));
+}));
+
+router.delete('/todos/:id', requireAuth, ah(async (req, res) => {
+  const todo = await db.prepare('SELECT * FROM todos WHERE id=? AND user_id=?').get(req.params.id, req.user.id);
+  if (!todo) return res.status(404).json({ error: 'Todo not found' });
+  await db.prepare('DELETE FROM todos WHERE id=?').run(todo.id);
+  res.json({ ok: true });
+}));
+
 module.exports = router;

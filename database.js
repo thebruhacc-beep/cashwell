@@ -129,6 +129,14 @@ async function initDb() {
       option_idx INTEGER NOT NULL,
       PRIMARY KEY (message_id, user_id)
     );
+    CREATE TABLE IF NOT EXISTS todos (
+      id         TEXT PRIMARY KEY,
+      user_id    TEXT NOT NULL,
+      text       TEXT NOT NULL,
+      done       INTEGER NOT NULL DEFAULT 0,
+      position   INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
+    );
   `);
 
   // Migration for databases created before the `asset` column existed
