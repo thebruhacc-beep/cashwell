@@ -991,6 +991,51 @@ function buildHeatmap() {
 }
 
 // ─── CALENDAR PAGE (monthly money heatmap + todo sidebar) ─────────────────────
+// Which month is currently shown — persists across re-renders until navigated.
+let calView = null;
+
+// Full dollar amount with decimals, no K/M abbreviation — used everywhere on
+// the calendar since the user wants to see exact cents, not rounded totals.
+function fmtDec(n) {
+  const s = n >= 0 ? '+' : '-';
+  return `${s}$${Math.abs(n).toFixed(2)}`;
+}
+
+function calPrevMonth() {
+  if (!calView) calView = { year: new Date().getFullYear(), month: new Date().getMonth() };
+  calView.month--;
+  if (calView.month < 0) { calView.month = 11; calView.year--; }
+  renderPage();
+}
+function calNextMonth() {
+  if (!calView) calView = { year: new Date().getFullYear(), month: new Date().getMonth() };
+  const real = new Date();
+  if (calView.year === real.getFullYear() && calView.month === real.getMonth()) return; // no peeking into the future
+  calView.month++;
+  if (calView.month > 11) { calView.month = 0; calView.year++; }
+  renderPage();
+}
+function calGoTo(year, month) { calView = { year, month }; renderPage(); }
+
+// Jumps the calendar to the single best day you've ever had.
+function goToAllTimeRecordDay() {
+  const dayTotals = {};
+  STATE.transactions.forEach(t => { if (t.date) dayTotals[t.date] = (dayTotals[t.date]||0) + t.amount; });
+  const best = Object.entries(dayTotals).filter(([,v]) => v > 0).sort((a,b) => b[1]-a[1])[0];
+  if (!best) { toast('No record yet', 'Add some profit entries first'); return; }
+  const [y,m] = best[0].split('-').map(Number);
+  calGoTo(y, m-1);
+}
+// Jumps the calendar to your best month ever.
+function goToBestMonth() {
+  const monthTotals = {};
+  STATE.transactions.forEach(t => { if (t.date) { const k=t.date.slice(0,7); monthTotals[k]=(monthTotals[k]||0)+t.amount; } });
+  const best = Object.entries(monthTotals).filter(([,v]) => v > 0).sort((a,b) => b[1]-a[1])[0];
+  if (!best) { toast('No record yet', 'Add some profit entries first'); return; }
+  const [y,m] = best[0].split('-').map(Number);
+  calGoTo(y, m-1);
+}
+
 function renderCalendarPage(container) {
   const row = el('div', {className:'g2-todo'});
   try { row.append(buildMonthCalendar()); } catch(e) { console.error('MonthCalendar error',e); }
@@ -999,33 +1044,57 @@ function renderCalendarPage(container) {
 }
 
 function buildMonthCalendar() {
-  const now = new Date();
-  const year = now.getFullYear(), month = now.getMonth(); // 0-indexed
-  const monthLabel = now.toLocaleDateString('en-US', {month:'long', year:'numeric'});
+  if (!calView) calView = { year: new Date().getFullYear(), month: new Date().getMonth() };
+  const { year, month } = calView; // month is 0-indexed
+  const real = new Date();
+  const isCurrentMonth = year === real.getFullYear() && month === real.getMonth();
+  const monthLabel = new Date(year, month, 1).toLocaleDateString('en-US', {month:'long', year:'numeric'});
   const daysInMonth = new Date(year, month+1, 0).getDate();
   const firstWeekday = (new Date(year, month, 1).getDay() + 6) % 7; // Monday=0
+  const realTodayStr = todayStr();
 
   // Sum every transaction into its day (all-time, so we can find the all-time
-  // record) and separately track just this month's days.
+  // record) and separately track just the viewed month's days.
   const dayTotals = {};
   STATE.transactions.forEach(t => { if (t.date) dayTotals[t.date] = (dayTotals[t.date]||0) + t.amount; });
 
   const monthKeys = Object.keys(dayTotals).filter(k => k.slice(0,7) === `${year}-${String(month+1).padStart(2,'0')}`);
   const monthTotal = monthKeys.reduce((s,k) => s + dayTotals[k], 0);
 
-  // Average is based on this month's PROFIT days only — that's the "normal good day" baseline.
-  const profitVals = monthKeys.map(k => dayTotals[k]).filter(v => v > 0);
-  const avg = profitVals.length ? profitVals.reduce((a,b)=>a+b,0) / profitVals.length : 0;
+  // Average is a ROLLING trailing-year window (today back 365 days), not tied
+  // to the viewed month — so it shifts forward day by day like it should, and
+  // colors stay meaningful no matter which month you're browsing.
+  const realToday = new Date(); realToday.setHours(0,0,0,0);
+  const yearAgo = new Date(realToday); yearAgo.setDate(yearAgo.getDate()-365);
+  const yearAgoStr = localDateStr(yearAgo);
+  const trailingProfitVals = Object.entries(dayTotals)
+    .filter(([k,v]) => v > 0 && k >= yearAgoStr && k <= realTodayStr)
+    .map(([,v]) => v);
+  const avg = trailingProfitVals.length ? trailingProfitVals.reduce((a,b)=>a+b,0) / trailingProfitVals.length : 0;
 
   // All-time single-day record (across every transaction ever), used for the crown.
   const allVals = Object.values(dayTotals);
   const allTimeBest = allVals.length ? Math.max(...allVals) : null;
 
   const card = el('div', {className:'card'});
-  const header = el('div', {className:'flex-between mb16', style:{flexWrap:'wrap',gap:'8px'}});
-  header.append(html(`<div class="section-title" style="margin:0">${monthLabel.toUpperCase()} HEATMAP</div>`));
-  header.append(html(`<div style="font-family:Orbitron,sans-serif;font-size:20px" class="${monthTotal>=0?'ng':'nr'}">${fmt(monthTotal)}<span class="f10 mut" style="margin-left:6px;letter-spacing:1px">MONTH TOTAL</span></div>`));
+
+  // Header: month nav + total
+  const header = el('div', {className:'flex-between mb8', style:{flexWrap:'wrap',gap:'8px'}});
+  const navBox = el('div', {className:'flex-gap8'});
+  navBox.append(el('button', {className:'cal-nav-btn', onclick:calPrevMonth, title:'Previous month'}, '‹'));
+  navBox.append(html(`<div class="section-title" style="margin:0;min-width:150px;text-align:center">${monthLabel.toUpperCase()}</div>`));
+  const nextBtn = el('button', {className:`cal-nav-btn ${isCurrentMonth?'disabled':''}`, title: isCurrentMonth?'Already at this month':'Next month'}, '›');
+  if (!isCurrentMonth) nextBtn.onclick = calNextMonth;
+  navBox.append(nextBtn);
+  header.append(navBox);
+  header.append(html(`<div style="font-family:Orbitron,sans-serif;font-size:20px" class="${monthTotal>=0?'ng':'nr'}">${fmtDec(monthTotal)}<span class="f10 mut" style="margin-left:6px;letter-spacing:1px">MONTH TOTAL</span></div>`));
   card.append(header);
+
+  // Quick-jump record buttons
+  const jumpRow = el('div', {className:'flex-gap8 mb16', style:{flexWrap:'wrap'}});
+  jumpRow.append(el('button', {className:'btn btn-gh btn-sm', onclick:goToAllTimeRecordDay}, '👑 Best Day Ever'));
+  jumpRow.append(el('button', {className:'btn btn-gh btn-sm', onclick:goToBestMonth}, '📅 Best Month Ever'));
+  card.append(jumpRow);
 
   // Weekday header row
   const wdRow = el('div', {className:'cal-grid mb8'});
@@ -1042,7 +1111,7 @@ function buildMonthCalendar() {
     const key = `${year}-${String(month+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
     const val = dayTotals[key] || 0;
     const isRecord = allTimeBest !== null && val === allTimeBest && val > 0;
-    const isFuture = key > todayStr();
+    const isFuture = key > realTodayStr;
 
     let cls = 'cal-day';
     let statusLabel = '';
@@ -1055,19 +1124,19 @@ function buildMonthCalendar() {
       statusLabel = '🔴 Loss';
     } else {
       const ratio = avg > 0 ? val / avg : 1;
-      if (ratio > 1.15) { cls += ' impressive'; statusLabel = `🔵 ${Math.round((ratio-1)*100)}% above your average`; }
-      else if (ratio < 0.85) { cls += ' below'; statusLabel = '🟡 Below your average'; }
-      else { cls += ' onavg'; statusLabel = '🟢 Around your average'; }
+      if (ratio > 1.5) { cls += ' impressive'; statusLabel = `🔵 ${Math.round((ratio-1)*100)}% above your 1-year average`; }
+      else if (ratio < 0.85) { cls += ' below'; statusLabel = '🟡 Below your 1-year average'; }
+      else { cls += ' onavg'; statusLabel = '🟢 Around your 1-year average'; }
     }
 
     const cell = el('div', {className:cls});
     if (isRecord) cell.append(el('div', {className:'cal-crown', title:'All-time record day'}, '👑'));
     cell.append(el('div', {className:'cal-day-num'}, String(day)));
-    if (val !== 0 && !isFuture) cell.append(el('div', {className:'cal-day-amt'}, `${val>0?'+':''}${Math.round(val)}`));
+    if (val !== 0 && !isFuture) cell.append(el('div', {className:'cal-day-amt'}, fmtDec(val)));
 
     if (!isFuture && val !== 0) {
       cell.onmouseenter = () => {
-        info.innerHTML = `<b>${key}</b> — <span style="color:${val>0?'#00ff88':'#ff3366'}">${fmt(val)}</span>${statusLabel?` &nbsp;·&nbsp; ${statusLabel}`:''}`;
+        info.innerHTML = `<b>${key}</b> — <span style="color:${val>0?'#00ff88':'#ff3366'}">${fmtDec(val)}</span>${statusLabel?` &nbsp;·&nbsp; ${statusLabel}`:''}`;
       };
       cell.onmouseleave = () => { info.textContent = ''; };
     }
@@ -1079,7 +1148,7 @@ function buildMonthCalendar() {
     <div class="flex-gap8 mt16 f11 mut" style="flex-wrap:wrap">
       <span>● <span style="color:#ffe600">Below average</span></span>
       <span>● <span style="color:#00ff88">Average</span></span>
-      <span>● <span style="color:#00d4ff">Impressive</span></span>
+      <span>● <span style="color:#00d4ff">Impressive (50%+ above)</span></span>
       <span>● <span style="color:#ff3366">Loss</span></span>
       <span>👑 All-time record day</span>
     </div>
