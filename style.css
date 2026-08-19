@@ -419,6 +419,71 @@ input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(1) opacit
 }
 .crypto-result:hover { border-color: var(--b); background: rgba(0,212,255,.06); }
 
+/* ── STRATEGY TRACKER ────────────────────────────────────────────────────────── */
+.strat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px; }
+.strat-card {
+  position: relative;
+  background: var(--card); border: 1px solid var(--bdr); border-radius: 14px;
+  padding: 20px; cursor: pointer; transition: all .2s; overflow: hidden;
+}
+.strat-card:hover { transform: translateY(-3px); box-shadow: 0 8px 24px rgba(0,0,0,.35); }
+.strat-card-glow { position: absolute; top: -40px; right: -40px; width: 100px; height: 100px; border-radius: 50%; filter: blur(40px); opacity: .18; pointer-events: none; }
+.strat-card-icon {
+  width: 44px; height: 44px; border-radius: 12px; border: 1px solid;
+  display: flex; align-items: center; justify-content: center; font-size: 20px; margin-bottom: 12px;
+}
+.strat-card-name { font-family: 'Orbitron', sans-serif; font-size: 14px; margin-bottom: 6px; position: relative; }
+.strat-card-desc { font-size: 11px; color: var(--mut); line-height: 1.5; margin-bottom: 10px; min-height: 32px; }
+.strat-card-meta { font-size: 10px; color: var(--mut); letter-spacing: .5px; border-top: 1px solid var(--bdr); padding-top: 8px; }
+
+.strat-icon-btn {
+  width: 46px; height: 46px; border-radius: 12px; border: 1px solid;
+  font-size: 22px; cursor: pointer; display: flex; align-items: center; justify-content: center;
+  transition: transform .15s;
+}
+.strat-icon-btn:hover { transform: scale(1.06); }
+.strat-picker {
+  display: none; position: absolute; top: 54px; left: 0; z-index: 20;
+  background: #14141f; border: 1px solid var(--bdr); border-radius: 12px; padding: 8px;
+  grid-template-columns: repeat(4, 1fr); gap: 4px; width: 176px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.5);
+}
+.strat-picker.open { display: grid; }
+.strat-picker-opt {
+  background: rgba(255,255,255,.04); border: 1px solid transparent; border-radius: 8px;
+  font-size: 18px; padding: 6px; cursor: pointer; transition: all .15s;
+}
+.strat-picker-opt:hover { background: rgba(255,255,255,.1); border-color: var(--bdr); }
+
+.strat-name-edit {
+  font-family: 'Orbitron', sans-serif; font-size: 18px; outline: none; cursor: text;
+  border-radius: 6px; padding: 4px 6px; margin-left: -6px;
+}
+.strat-name-edit:hover, .strat-name-edit:focus { background: rgba(255,255,255,.04); }
+
+.strat-color-dot {
+  width: 18px; height: 18px; border-radius: 50%; border: 2px solid transparent;
+  cursor: pointer; transition: all .15s;
+}
+.strat-color-dot.active { border-color: #fff; transform: scale(1.15); }
+
+.strat-check-row {
+  display: flex; align-items: center; gap: 10px; padding: 8px 4px;
+  border-bottom: 1px solid var(--bdr); transition: opacity .15s;
+}
+.strat-check-row:last-child { border-bottom: none; }
+.strat-check-row.checked .todo-text { color: var(--g); }
+
+.strat-meter {
+  border: 1px solid; border-radius: 12px; padding: 14px; background: rgba(255,255,255,.02);
+  transition: all .3s;
+}
+.strat-meter.full { animation: stratPulse 1.6s ease-in-out infinite; }
+@keyframes stratPulse {
+  0%, 100% { box-shadow: 0 0 0px rgba(0,212,255,.3); }
+  50%      { box-shadow: 0 0 22px rgba(0,212,255,.5); }
+}
+
 /* ── COPY ROW ─────────────────────────────────────────────────────────────────── */
 .copy-row {
   display: flex;

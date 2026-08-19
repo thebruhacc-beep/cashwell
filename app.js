@@ -13,6 +13,8 @@ const STATE = {
   deposits:     [],
   messages:     [],
   todos:        [],
+  monthWinrates: [],
+  strategies:   [],
   charts:       {},   // chart.js instances keyed by canvas id
 };
 
@@ -30,7 +32,14 @@ const CRYPTO_COINS = {
 };
 
 // symbol -> live USD price, refreshed periodically while logged in.
+// Hydrated from localStorage immediately so a page refresh shows the last-known
+// prices instantly instead of "$0.00 / loading..." until the network round-trip
+// finishes — a fresh fetch still kicks off right away underneath.
 let LIVE_PRICES = {};
+try {
+  const cachedPrices = JSON.parse(localStorage.getItem('nf_live_prices') || '{}');
+  if (cachedPrices && typeof cachedPrices === 'object') LIVE_PRICES = cachedPrices;
+} catch (e) { /* corrupt cache — ignore, starts empty */ }
 
 async function refreshLivePrices(extraSymbols = []) {
   const symbols = [...new Set([...STATE.wallet.filter(w => w.asset).map(w => w.asset), ...extraSymbols])];
@@ -39,10 +48,18 @@ async function refreshLivePrices(extraSymbols = []) {
   try {
     const res  = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd`);
     const data = await res.json();
+    let changed = false;
     symbols.forEach(s => {
       const id = CRYPTO_COINS[s];
-      if (id && data[id]?.usd !== undefined) LIVE_PRICES[s] = data[id].usd;
+      if (id && data[id]?.usd !== undefined) { LIVE_PRICES[s] = data[id].usd; changed = true; }
     });
+    if (changed) {
+      try { localStorage.setItem('nf_live_prices', JSON.stringify(LIVE_PRICES)); } catch (e) {}
+      // Prices arrived after the page already rendered with stale/empty values —
+      // re-render so the wallet/dashboard actually reflect them instead of
+      // silently sitting on old numbers until some unrelated action re-renders.
+      if (['dashboard', 'wallet', 'leaderboard'].includes(STATE.page)) renderPage();
+    }
   } catch (e) { console.error('live price fetch error:', e); }
 }
 
@@ -52,6 +69,10 @@ function walletUSD(w) {
   if (w.asset) return (w.balance || 0) * (LIVE_PRICES[w.asset] || 0);
   return w.balance || 0;
 }
+// Wallets the user hasn't hidden — used everywhere a TOTAL is shown (net worth,
+// pie chart, wallet sum). Hidden wallets still exist and can be un-hidden from
+// the wallet edit screen, they just don't count toward any aggregate.
+function visibleWallets() { return STATE.wallet.filter(w => !w.hidden); }
 const NAV_ITEMS    = [
   {id:'dashboard',  icon:'◈', label:'Dashboard'},
   {id:'calendar',   icon:'▦', label:'Calendar'},
@@ -323,7 +344,7 @@ async function pollForUpdates() {
 
 // ─── DATA LOADING ─────────────────────────────────────────────────────────────
 async function loadAll() {
-  const [txns, wal, cats, grp, deps, msgs, todos] = await Promise.all([
+  const [txns, wal, cats, grp, deps, msgs, todos, winrates, strategies] = await Promise.all([
     api('GET', '/transactions'),
     api('GET', '/wallet'),
     api('GET', '/categories'),
@@ -331,14 +352,18 @@ async function loadAll() {
     api('GET', '/deposits'),
     api('GET', '/messages'),
     api('GET', '/todos'),
+    api('GET', '/month-winrate'),
+    api('GET', '/strategies'),
   ]);
-  STATE.transactions = txns;
-  STATE.wallet       = wal;
-  STATE.categories   = cats;
-  STATE.group        = grp;
-  STATE.deposits     = deps;
-  STATE.messages     = msgs;
-  STATE.todos        = todos;
+  STATE.transactions  = txns;
+  STATE.wallet        = wal;
+  STATE.categories    = cats;
+  STATE.group         = grp;
+  STATE.deposits      = deps;
+  STATE.messages      = msgs;
+  STATE.todos         = todos;
+  STATE.monthWinrates = winrates;
+  STATE.strategies    = strategies;
 }
 
 // ─── AUTH ─────────────────────────────────────────────────────────────────────
@@ -466,7 +491,7 @@ function tickerInner() {
 // ─── SIDEBAR ──────────────────────────────────────────────────────────────────
 function buildSidebar() {
   const pendingCount = STATE.deposits.filter(d => d.status==='pending' && STATE.group?.admin_id===STATE.user?.id).length;
-  const netWorth      = STATE.wallet.reduce((s,w) => s+walletUSD(w), 0);
+  const netWorth      = visibleWallets().reduce((s,w) => s+walletUSD(w), 0);
 
   const sb = el('div', {className:'sidebar'});
 
@@ -869,16 +894,18 @@ function buildWalletCard(showFundBtn=true) {
 
 function renderWalletBody(container, editing) {
   container.innerHTML = '';
-  const total = STATE.wallet.reduce((s,w)=>s+walletUSD(w),0);
+  const shown = visibleWallets();
+  const total = shown.reduce((s,w)=>s+walletUSD(w),0);
+  const hiddenCount = STATE.wallet.length - shown.length;
 
   if (!editing) {
-    // Pie chart + list
+    // Pie chart + list — hidden wallets are fully excluded here (and from the total)
     const chartWrap = el('div', {style:{display:'flex',justifyContent:'center',marginBottom:'12px'}});
     const canvas    = el('canvas', {id:'wallet-pie', style:{width:'160px',height:'160px'}});
     chartWrap.append(canvas);
     container.append(chartWrap);
 
-    const pieData = STATE.wallet.filter(w=>walletUSD(w)>0);
+    const pieData = shown.filter(w=>walletUSD(w)>0);
     setTimeout(() => {
       const ex = STATE.charts['wallet-pie']; if(ex) ex.destroy();
       const ctx  = $('wallet-pie')?.getContext('2d');
@@ -891,7 +918,7 @@ function renderWalletBody(container, editing) {
     }, 50);
 
     container.append(html(`<div style="text-align:center;font-family:Orbitron,sans-serif;font-size:22px;color:#00ff88;margin-bottom:12px">$${total.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</div>`));
-    STATE.wallet.forEach((w) => {
+    shown.forEach((w) => {
       const pieIdx = pieData.findIndex(p=>p.name===w.name);
       const color  = pieIdx>=0 ? SLICE_COLORS[pieIdx%SLICE_COLORS.length] : '#64748b';
       const usd    = walletUSD(w);
@@ -906,31 +933,42 @@ function renderWalletBody(container, editing) {
         </div>
       `));
     });
+    if (hiddenCount > 0) {
+      container.append(html(`<div class="f10 mut text-center" style="padding-top:10px">🙈 ${hiddenCount} asset${hiddenCount>1?'s':''} hidden — tap EDIT to show ${hiddenCount>1?'them':'it'} again</div>`));
+    }
   } else {
-    // Edit mode
+    // Edit mode — every wallet shows here, including hidden ones, so they can be un-hidden
     const coinOptionsHTML = ['<option value="">— fiat ($) —</option>']
       .concat(Object.keys(CRYPTO_COINS).map(sym => `<option value="${sym}">${sym}</option>`))
       .join('');
 
     STATE.wallet.forEach((w,i) => {
-      const row  = el('div', {className:'flex-gap8', style:{marginBottom:'8px',flexWrap:'wrap',alignItems:'center'}});
+      const row  = el('div', {className:'flex-gap8', style:{marginBottom:'8px',flexWrap:'wrap',alignItems:'center',opacity:w.hidden?0.5:1}});
       const dot  = el('div', {style:{width:'8px',height:'8px',borderRadius:'50%',background:SLICE_COLORS[i%SLICE_COLORS.length],flexShrink:'0'}});
       const name = el('span', {className:'f12', style:{width:'70px',flexShrink:'0',color:SLICE_COLORS[i%SLICE_COLORS.length]}}, w.name);
       const inp  = el('input', {className:'inp wallet-inp', type:'number', step:'any', value:w.balance, 'data-name':w.name, style:{width:'90px',flexShrink:'0'}, title:w.asset?'Amount of '+w.asset+' held':'Balance in $'});
       const assetSel = el('select', {className:'inp wallet-asset-sel', 'data-name':w.name, style:{width:'92px',flexShrink:'0'}});
       assetSel.innerHTML = coinOptionsHTML;
       assetSel.value = w.asset || '';
+      const eyeBtn = el('button', {className:'btn btn-gh btn-sm', style:{flexShrink:'0'}, title:w.hidden?'Hidden — click to show':'Visible — click to hide', onclick: async () => {
+        const newHidden = !w.hidden;
+        try {
+          await api('PUT', `/wallet/${encodeURIComponent(w.name)}/hidden`, {hidden:newHidden});
+          w.hidden = newHidden ? 1 : 0;
+          renderWalletBody(container, true);
+        } catch(e) { toast('Error', e.message); }
+      }}, w.hidden ? '🙈' : '👁');
       const del  = el('button', {className:'btn btn-r btn-sm', style:{flexShrink:'0'}, onclick:()=>{
         api('DELETE',`/wallet/${encodeURIComponent(w.name)}`).then(()=>{
           STATE.wallet = STATE.wallet.filter(x=>x.name!==w.name);
           renderWalletBody(container, true);
         });
       }}, '✕');
-      if (STATE.wallet.length > 1) row.append(dot, name, inp, assetSel, del);
-      else row.append(dot, name, inp, assetSel);
+      if (STATE.wallet.length > 1) row.append(dot, name, inp, assetSel, eyeBtn, del);
+      else row.append(dot, name, inp, assetSel, eyeBtn);
       container.append(row);
     });
-    container.append(html('<div class="f10 mut" style="margin:4px 0 8px">Crypto: vul het aantal coins in (bv. 0.1) en kies de coin ernaast — $-waarde wordt live berekend.</div>'));
+    container.append(html('<div class="f10 mut" style="margin:4px 0 8px">Crypto: vul het aantal coins in (bv. 0.1) en kies de coin ernaast — $-waarde wordt live berekend. 👁 verbergt een asset uit je totaal, taartdiagram en net worth.</div>'));
 
     const addRow = el('div', {className:'flex-gap8', style:{marginTop:'8px',flexWrap:'wrap'}});
     const newInp = el('input', {className:'inp', id:'new-wallet-type', placeholder:'New type (e.g. Trading...)'});
@@ -1091,6 +1129,39 @@ function buildMonthCalendar() {
   header.append(navBox);
   header.append(html(`<div style="font-family:Orbitron,sans-serif;font-size:20px" class="${monthTotal>=0?'ng':'nr'}">${fmtDec(monthTotal)}<span class="f10 mut" style="margin-left:6px;letter-spacing:1px">MONTH TOTAL</span></div>`));
   card.append(header);
+
+  // Win rate for this month — type "wins/losses" (e.g. 6/2) and hit Enter
+  const monthKey = `${year}-${String(month+1).padStart(2,'0')}`;
+  const wrEntry  = STATE.monthWinrates.find(w => w.month === monthKey);
+  const wrRow = el('div', {className:'flex-gap8 mb16', style:{alignItems:'center',flexWrap:'wrap'}});
+  wrRow.append(html('<div class="f10 mut" style="letter-spacing:1px">WIN RATE</div>'));
+  const wrInp = el('input', {className:'inp', style:{width:'90px',padding:'6px 10px',fontSize:'12px'}, placeholder:'6/2', value: wrEntry ? `${wrEntry.wins}/${wrEntry.losses}` : ''});
+  const wrResult = el('span', {className:'f12', style:{fontFamily:'Orbitron,sans-serif'}});
+  function renderWrResult() {
+    const e = STATE.monthWinrates.find(w => w.month === monthKey);
+    if (!e || (e.wins===0 && e.losses===0)) { wrResult.textContent = ''; return; }
+    const total = e.wins + e.losses;
+    const pct = total ? Math.round((e.wins/total)*100) : 0;
+    wrResult.style.color = pct>=60 ? '#00ff88' : pct>=40 ? '#ffe600' : '#ff3366';
+    wrResult.textContent = `${pct}% WR  (${e.wins}W / ${e.losses}L)`;
+  }
+  wrInp.addEventListener('keydown', async e => {
+    if (e.key !== 'Enter') return;
+    const m = wrInp.value.trim().match(/^(\d+)\s*\/\s*(\d+)$/);
+    if (!m) { toast('Format', 'Type as wins/losses, e.g. 6/2'); return; }
+    const wins = parseInt(m[1]), losses = parseInt(m[2]);
+    try {
+      await api('PUT', `/month-winrate/${monthKey}`, {wins, losses});
+      const idx = STATE.monthWinrates.findIndex(w => w.month === monthKey);
+      if (idx>-1) STATE.monthWinrates[idx] = {month:monthKey, wins, losses};
+      else STATE.monthWinrates.push({month:monthKey, wins, losses});
+      renderWrResult();
+      wrInp.blur();
+    } catch(e) { toast('Error', e.message); }
+  });
+  wrRow.append(wrInp, wrResult);
+  card.append(wrRow);
+  renderWrResult();
 
   // Quick-jump record buttons
   const jumpRow = el('div', {className:'flex-gap8 mb16', style:{flexWrap:'wrap'}});
@@ -1700,8 +1771,9 @@ async function showMemberProfile(member) {
     recsRow.append(bestCard2, worstCard2);
     body.append(recsRow);
 
-    // Net worth = wallet total
-    const totalBal = data.wallets.reduce((sum,w)=>sum+walletUSD(w),0);
+    // Net worth = wallet total (hidden wallets excluded, same rule as the wallet page)
+    const visWallets = data.wallets.filter(w=>!w.hidden);
+    const totalBal = visWallets.reduce((sum,w)=>sum+walletUSD(w),0);
     const nwCard = el('div', {style:{padding:'14px 16px',background:'rgba(167,139,250,.06)',border:'1px solid rgba(167,139,250,.2)',borderRadius:'12px',marginBottom:'16px',display:'flex',justifyContent:'space-between',alignItems:'center'}});
     nwCard.innerHTML = `
       <div><div class="f10 mut" style="letter-spacing:2px;margin-bottom:4px">NET WORTH</div>
@@ -1711,10 +1783,10 @@ async function showMemberProfile(member) {
     body.append(nwCard);
 
     // Wallet breakdown
-    if (data.wallets.length) {
+    if (visWallets.length) {
       const walletCard = el('div', {style:{padding:'16px',background:'rgba(255,255,255,.03)',border:'1px solid var(--bdr)',borderRadius:'12px',marginBottom:'16px'}});
       walletCard.innerHTML = '<div class="f11 mut" style="letter-spacing:2px;margin-bottom:12px">WALLETS</div>';
-      data.wallets.filter(w=>walletUSD(w)>=0).forEach((w,i) => {
+      visWallets.filter(w=>walletUSD(w)>=0).forEach((w,i) => {
         const usd = walletUSD(w);
         const pct = totalBal>0 ? (usd/totalBal*100).toFixed(1) : 0;
         const color = SLICE_COLORS2[i%SLICE_COLORS2.length];
@@ -2071,7 +2143,7 @@ function showDepositModal() {
     if (step===1) {
       modal.innerHTML = `<div class="modal-title ng">DEPOSIT TO FUND</div><div class="modal-sub">Transfer into <span style="color:#00ff88">${STATE.group.name}</span></div>`;
       const srcSel = el('select', {className:'sel mb8'});
-      STATE.wallet.filter(w=>!w.asset).forEach(w => srcSel.append(el('option', {value:w.name}, `${w.name} — $${walletUSD(w).toFixed(2)} available`)));
+      visibleWallets().filter(w=>!w.asset).forEach(w => srcSel.append(el('option', {value:w.name}, `${w.name} — $${walletUSD(w).toFixed(2)} available`)));
       const amtInp = el('input', {className:'inp mb8', type:'number', placeholder:'Amount (USD)'});
       const noteInp= el('input', {className:'inp mb16', placeholder:'Reference / note (optional)'});
       const err    = el('div', {className:'err mb8'});
@@ -2664,10 +2736,10 @@ function renderLeaderboard(container) {
   myCard.append(myStatRow);
 
   // Wallet breakdown
-  if (STATE.wallet.length) {
-    const totalBal = STATE.wallet.reduce((s,w)=>s+walletUSD(w),0);
+  if (visibleWallets().length) {
+    const totalBal = visibleWallets().reduce((s,w)=>s+walletUSD(w),0);
     const walletRow = el('div', {style:{display:'flex',gap:'8px',flexWrap:'wrap'}});
-    STATE.wallet.filter(w=>walletUSD(w)>0).forEach((w,i) => {
+    visibleWallets().filter(w=>walletUSD(w)>0).forEach((w,i) => {
       const color = SLICE_COLORS[i%SLICE_COLORS.length];
       const usd = walletUSD(w);
       const pct = totalBal>0?(usd/totalBal*100).toFixed(0):0;
@@ -2733,6 +2805,7 @@ let activeTool = null; // null = hub grid, otherwise the tool's id
 function renderToolsPage(container) {
   if (activeTool === 'risk')     { renderRiskTool(container); return; }
   if (activeTool === 'propfirm') { renderPropFirmTool(container); return; }
+  if (activeTool === 'strategy') { renderStrategyTool(container); return; }
 
   const wrap = el('div', {className:'flex-col', style:{gap:'20px'}});
   wrap.append(html('<div class="mut f12" style="max-width:640px">Handy standalone calculators and utilities — nothing here touches your transactions or balance unless you tell it to.</div>'));
@@ -2754,6 +2827,14 @@ function renderToolsPage(container) {
     <div class="tool-desc">See exactly how much more you can lose — in $ or pips — before you blow your daily or max total drawdown limit.</div>
   `;
   grid.append(propCard);
+
+  const stratCard = el('div', {className:'tool-card', onclick:()=>{ activeTool='strategy'; renderPage(); }});
+  stratCard.innerHTML = `
+    <div class="tool-icon">🧠</div>
+    <div class="tool-name">Strategy Tracker</div>
+    <div class="tool-desc">Write your strategies as living checklists, with branches that kick in after a loss — and a confidence meter before you pull the trigger.</div>
+  `;
+  grid.append(stratCard);
 
   grid.append(html(`
     <div class="tool-card soon">
@@ -3210,6 +3291,254 @@ function updatePropResults(panel) {
   panel.append(summary);
 }
 
+
+// ─── STRATEGY TRACKER ────────────────────────────────────────────────────────────
+const STRAT_ICONS  = ['🎯','🔥','⚡','📈','📉','🛡','🚀','💎','🧠','🐂','🐻','🎲','🌊','⚔️','🕹️','🧊'];
+const STRAT_COLORS = ['#00d4ff','#00ff88','#bf5fff','#ffe600','#ff8c00','#ff3366','#00ffcc','#c084fc'];
+
+let openStrategyId = null;      // which strategy is expanded, or null = grid view
+let activeBranchId  = {};       // strategyId -> currently selected branch id
+let checkedState    = {};       // strategyId -> branchId -> { checkId: bool } — ephemeral, resets per session
+
+function renderStrategyTool(container) {
+  if (openStrategyId) {
+    const s = STATE.strategies.find(x => x.id === openStrategyId);
+    if (s) { renderStrategyDetail(container, s); return; }
+    openStrategyId = null; // strategy was deleted elsewhere — fall through to grid
+  }
+
+  const wrap = el('div', {className:'flex-col', style:{gap:'20px'}});
+  wrap.append(el('button', {className:'btn btn-gh btn-sm', onclick:()=>{ activeTool=null; renderPage(); }}, '← BACK TO TOOLS'));
+
+  const header = el('div', {className:'flex-between', style:{flexWrap:'wrap',gap:'10px'}});
+  header.append(html('<div class="section-title" style="margin:0">🧠 STRATEGY TRACKER</div>'));
+  const newBtn = el('button', {className:'btn btn-g btn-sm', onclick: createStrategy}, '+ NEW STRATEGY');
+  header.append(newBtn);
+  wrap.append(header);
+
+  if (!STATE.strategies.length) {
+    wrap.append(html(`
+      <div class="card text-center" style="padding:48px 24px">
+        <div style="font-size:36px;margin-bottom:12px">🧠</div>
+        <div class="f13 bold mb8">No strategies yet</div>
+        <div class="f12 mut" style="max-width:380px;margin:0 auto">Write down your rules as a checklist, add a branch for what changes after a loss, and run through it before every trade.</div>
+      </div>
+    `));
+  } else {
+    const grid = el('div', {className:'strat-grid'});
+    STATE.strategies.forEach(s => {
+      const branchCount = (s.branches||[]).length;
+      const checkCount  = (s.branches||[]).reduce((sum,b)=>sum+(b.checklist||[]).length, 0);
+      const card = el('div', {className:'strat-card', style:{borderColor:`${s.color}55`}, onclick:()=>{ openStrategyId=s.id; renderPage(); }});
+      card.innerHTML = `
+        <div class="strat-card-glow" style="background:${s.color}"></div>
+        <div class="strat-card-icon" style="background:${s.color}22;border-color:${s.color}55">${s.icon}</div>
+        <div class="strat-card-name">${s.name}</div>
+        <div class="strat-card-desc">${s.description ? s.description.slice(0,80) : 'No description yet — click to write your rules.'}</div>
+        <div class="strat-card-meta">${branchCount} branch${branchCount===1?'':'es'} · ${checkCount} check${checkCount===1?'':'s'}</div>
+      `;
+      grid.append(card);
+    });
+    wrap.append(grid);
+  }
+
+  container.append(wrap);
+}
+
+async function createStrategy() {
+  const name = (prompt('Name your strategy (e.g. "London Breakout"):') || '').trim();
+  if (!name) return;
+  try {
+    const s = await api('POST', '/strategies', {name});
+    STATE.strategies.push(s);
+    openStrategyId = s.id;
+    renderPage();
+  } catch(e) { toast('Error', e.message); }
+}
+
+async function patchStrategy(s, patch) {
+  const updated = await api('PUT', `/strategies/${s.id}`, patch);
+  Object.assign(s, updated);
+  return s;
+}
+
+async function deleteStrategy(s) {
+  if (!confirm(`Delete "${s.name}"? This can't be undone.`)) return;
+  try {
+    await api('DELETE', `/strategies/${s.id}`);
+    STATE.strategies = STATE.strategies.filter(x=>x.id!==s.id);
+    openStrategyId = null;
+    renderPage();
+  } catch(e) { toast('Error', e.message); }
+}
+
+function renderStrategyDetail(container, s) {
+  const wrap = el('div', {className:'flex-col', style:{gap:'20px'}});
+  wrap.append(el('button', {className:'btn btn-gh btn-sm', onclick:()=>{ openStrategyId=null; renderPage(); }}, '← ALL STRATEGIES'));
+
+  const card = el('div', {className:'card', style:{borderColor:`${s.color}44`}});
+
+  // Header: icon picker + name (editable) + color picker + delete
+  const hdr = el('div', {className:'flex-gap8 mb16', style:{alignItems:'flex-start',flexWrap:'wrap'}});
+
+  const iconBtn = el('button', {className:'strat-icon-btn', style:{background:`${s.color}22`,borderColor:`${s.color}55`}}, s.icon);
+  const iconPicker = el('div', {className:'strat-picker'});
+  STRAT_ICONS.forEach(ic => {
+    const b = el('button', {className:'strat-picker-opt', onclick: async ()=>{ await patchStrategy(s, {icon:ic}); renderPage(); }}, ic);
+    iconPicker.append(b);
+  });
+  iconBtn.onclick = () => iconPicker.classList.toggle('open');
+  const iconWrap = el('div', {style:{position:'relative'}});
+  iconWrap.append(iconBtn, iconPicker);
+  hdr.append(iconWrap);
+
+  const nameWrap = el('div', {style:{flex:'1',minWidth:'160px'}});
+  const nameEl = el('div', {contentEditable:'true', spellcheck:'false', className:'strat-name-edit', style:{color:s.color}}, s.name);
+  nameEl.addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); nameEl.blur(); } });
+  nameEl.addEventListener('blur', async () => {
+    const v = nameEl.textContent.trim();
+    if (!v || v===s.name) { nameEl.textContent = s.name; return; }
+    try { await patchStrategy(s, {name:v}); } catch(e) { nameEl.textContent = s.name; toast('Error', e.message); }
+  });
+  nameWrap.append(nameEl);
+  const colorRow = el('div', {className:'flex-gap8', style:{marginTop:'8px'}});
+  STRAT_COLORS.forEach(c => {
+    const dot = el('button', {className:`strat-color-dot ${s.color===c?'active':''}`, style:{background:c}, onclick: async ()=>{ await patchStrategy(s, {color:c}); renderPage(); }});
+    colorRow.append(dot);
+  });
+  nameWrap.append(colorRow);
+  hdr.append(nameWrap);
+
+  const delBtn = el('button', {className:'btn btn-r btn-sm', onclick:()=>deleteStrategy(s)}, '✕ DELETE');
+  hdr.append(delBtn);
+  card.append(hdr);
+
+  // Description / rules
+  const descLabel = el('div', {className:'label mb8'}, 'RULES / DESCRIPTION');
+  const descArea = el('textarea', {className:'inp', style:{width:'100%',minHeight:'70px',resize:'vertical',fontFamily:'inherit'}, placeholder:'Write out the rules of this strategy...'}, s.description||'');
+  descArea.addEventListener('blur', async () => {
+    if (descArea.value === s.description) return;
+    try { await patchStrategy(s, {description: descArea.value}); } catch(e) { toast('Error', e.message); }
+  });
+  card.append(descLabel, descArea);
+
+  // Branch tabs
+  const branchLabel = el('div', {className:'label mt16 mb8'}, 'BRANCHES');
+  const branchTabs = el('div', {className:'ptabs'});
+  if (!activeBranchId[s.id] || !s.branches.find(b=>b.id===activeBranchId[s.id])) {
+    activeBranchId[s.id] = s.branches[0]?.id;
+  }
+  s.branches.forEach(b => {
+    const tab = el('button', {className:`ptab ${activeBranchId[s.id]===b.id?'active':''}`, onclick:()=>{ activeBranchId[s.id]=b.id; renderPage(); }}, b.name);
+    branchTabs.append(tab);
+  });
+  const addBranchBtn = el('button', {className:'ptab', style:{opacity:.7}, onclick: async () => {
+    const name = (prompt('Branch name (e.g. "After a Loss", "After 2 Wins"):') || '').trim();
+    if (!name) return;
+    const newBranch = { id: 'b_'+Math.random().toString(36).slice(2,9), name, checklist: [] };
+    const branches = [...s.branches, newBranch];
+    try {
+      await patchStrategy(s, {branches});
+      activeBranchId[s.id] = newBranch.id;
+      renderPage();
+    } catch(e) { toast('Error', e.message); }
+  }}, '+ Add Branch');
+  branchTabs.append(addBranchBtn);
+  card.append(branchLabel, branchTabs);
+
+  const branch = s.branches.find(b=>b.id===activeBranchId[s.id]) || s.branches[0];
+
+  // Delete-branch option (only if more than 1 branch, keep at least one)
+  if (s.branches.length > 1) {
+    const delBranchBtn = el('button', {className:'btn btn-gh btn-sm mt8', style:{color:'#ff3366'}, onclick: async () => {
+      if (!confirm(`Delete branch "${branch.name}"?`)) return;
+      const branches = s.branches.filter(b=>b.id!==branch.id);
+      try {
+        await patchStrategy(s, {branches});
+        activeBranchId[s.id] = branches[0].id;
+        renderPage();
+      } catch(e) { toast('Error', e.message); }
+    }}, `✕ Delete "${branch.name}" branch`);
+    card.append(delBranchBtn);
+  }
+
+  // Checklist editor + run mode combined: each item has a checkbox (for running
+  // it live) AND is editable/deletable (for building it out).
+  const checklistLabel = el('div', {className:'label mt16 mb8'}, 'CHECKLIST');
+  const listWrap = el('div', {className:'flex-col', style:{gap:'6px'}});
+  if (!checkedState[s.id]) checkedState[s.id] = {};
+  if (!checkedState[s.id][branch.id]) checkedState[s.id][branch.id] = {};
+  const checks = checkedState[s.id][branch.id];
+
+  const meterWrap = el('div', {className:'mt16'});
+
+  function updateMeter() {
+    meterWrap.innerHTML = '';
+    const total = branch.checklist.length;
+    const done  = branch.checklist.filter(c => checks[c.id]).length;
+    if (!total) { return; }
+    const pct = Math.round((done/total)*100);
+    let color, verdict;
+    if (pct===100)      { color='#00d4ff'; verdict='🔥 ALL SYSTEMS GO'; }
+    else if (pct>=80)   { color='#00ff88'; verdict='🟢 Looking good'; }
+    else if (pct>=40)   { color='#ffe600'; verdict='🟡 Getting there'; }
+    else                { color='#ff3366'; verdict='⚠ Not ready'; }
+    const box = el('div', {className:`strat-meter ${pct===100?'full':''}`, style:{borderColor:`${color}55`}});
+    box.innerHTML = `
+      <div class="flex-between mb8">
+        <div class="f11" style="letter-spacing:1px;color:${color}">${verdict}</div>
+        <div class="f11 mut">${done}/${total} confirmed</div>
+      </div>
+      <div class="prog"><div class="prog-f" style="width:${pct}%;background:${color}"></div></div>
+    `;
+    const resetBtn = el('button', {className:'btn btn-gh btn-sm mt8', onclick:()=>{ checkedState[s.id][branch.id] = {}; renderPage(); }}, 'Reset Checklist');
+    box.append(resetBtn);
+    meterWrap.append(box);
+  }
+
+  branch.checklist.forEach(c => {
+    const row = el('div', {className:`strat-check-row ${checks[c.id]?'checked':''}`});
+    const cb = el('button', {className:`todo-check ${checks[c.id]?'on':''}`, onclick:()=>{ checks[c.id]=!checks[c.id]; renderPage(); }}, checks[c.id]?'✓':'');
+    const txt = el('div', {className:'todo-text', contentEditable:'true', spellcheck:'false'}, c.text);
+    txt.addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); txt.blur(); } });
+    txt.addEventListener('blur', async () => {
+      const v = txt.textContent.trim();
+      if (!v || v===c.text) { txt.textContent = c.text; return; }
+      c.text = v;
+      const branches = s.branches.map(b => b.id===branch.id ? branch : b);
+      try { await patchStrategy(s, {branches}); } catch(e) { toast('Error', e.message); }
+    });
+    const del = el('button', {className:'todo-del', onclick: async () => {
+      branch.checklist = branch.checklist.filter(x=>x.id!==c.id);
+      const branches = s.branches.map(b => b.id===branch.id ? branch : b);
+      try { await patchStrategy(s, {branches}); renderPage(); } catch(e) { toast('Error', e.message); }
+    }}, '✕');
+    row.append(cb, txt, del);
+    listWrap.append(row);
+  });
+  if (!branch.checklist.length) listWrap.append(html('<div class="mut f12" style="padding:8px 0">No checks yet — add your entry criteria below.</div>'));
+
+  const addCheckRow = el('div', {className:'form-row mt8'});
+  const addCheckInp = el('input', {className:'inp', placeholder:'Add a check, e.g. "Price above 200 EMA"'});
+  const addCheckBtn = el('button', {className:'btn btn-gh btn-sm'}, '+');
+  const doAddCheck = async () => {
+    const text = addCheckInp.value.trim();
+    if (!text) return;
+    addCheckInp.value = '';
+    branch.checklist.push({ id: 'c_'+Math.random().toString(36).slice(2,9), text });
+    const branches = s.branches.map(b => b.id===branch.id ? branch : b);
+    try { await patchStrategy(s, {branches}); renderPage(); } catch(e) { toast('Error', e.message); }
+  };
+  addCheckInp.addEventListener('keydown', e=>{ if(e.key==='Enter') doAddCheck(); });
+  addCheckBtn.onclick = doAddCheck;
+  addCheckRow.append(addCheckInp, addCheckBtn);
+
+  card.append(checklistLabel, listWrap, addCheckRow, meterWrap);
+  updateMeter();
+
+  wrap.append(card);
+  container.append(wrap);
+}
 
 function renderSettings(container) {
   const col = el('div', {className:'flex-col', style:{gap:'20px'}});

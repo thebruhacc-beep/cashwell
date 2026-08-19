@@ -91,6 +91,7 @@ async function initDb() {
       name    TEXT NOT NULL,
       balance REAL DEFAULT 0,
       asset   TEXT DEFAULT NULL,
+      hidden  INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (user_id, name)
     );
     CREATE TABLE IF NOT EXISTS categories (
@@ -137,6 +138,22 @@ async function initDb() {
       position   INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS month_winrate (
+      user_id TEXT NOT NULL,
+      month   TEXT NOT NULL,  -- 'YYYY-MM'
+      wins    INTEGER NOT NULL DEFAULT 0,
+      losses  INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (user_id, month)
+    );
+    CREATE TABLE IF NOT EXISTS strategies (
+      id         TEXT PRIMARY KEY,
+      user_id    TEXT NOT NULL,
+      name       TEXT NOT NULL,
+      data       TEXT NOT NULL,  -- JSON: {icon,color,description,branches:[{id,name,checklist:[{id,text}]}]}
+      position   INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
   `);
 
   // Migration for databases created before the `asset` column existed
@@ -158,6 +175,12 @@ async function initDb() {
   try {
     await client.execute('ALTER TABLE messages ADD COLUMN saved INTEGER NOT NULL DEFAULT 0');
     console.log('🔧 Migrated: added messages.saved column');
+  } catch (e) {
+    // Already exists — fine, ignore.
+  }
+  try {
+    await client.execute('ALTER TABLE wallet_types ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0');
+    console.log('🔧 Migrated: added wallet_types.hidden column');
   } catch (e) {
     // Already exists — fine, ignore.
   }

@@ -116,7 +116,7 @@ router.delete('/transactions/:id', requireAuth, ah(async (req, res) => {
 // ════════════════════════════════════════════════════════════════════════════
 
 router.get('/wallet', requireAuth, ah(async (req, res) => {
-  res.json(await db.prepare('SELECT name,balance,asset FROM wallet_types WHERE user_id=?').all(req.user.id));
+  res.json(await db.prepare('SELECT name,balance,asset,hidden FROM wallet_types WHERE user_id=?').all(req.user.id));
 }));
 
 router.put('/wallet/:name', requireAuth, ah(async (req, res) => {
@@ -124,6 +124,17 @@ router.put('/wallet/:name', requireAuth, ah(async (req, res) => {
   await db.prepare('INSERT INTO wallet_types (user_id,name,balance,asset) VALUES (?,?,?,?) ON CONFLICT(user_id,name) DO UPDATE SET balance=excluded.balance, asset=excluded.asset')
     .run(req.user.id, req.params.name, Number(balance) || 0, asset || null);
   res.json({ ok: true });
+}));
+
+// Toggle whether a wallet is hidden from the totals/pie chart/net worth — doesn't
+// touch balance or asset, so it can never accidentally wipe those out.
+router.put('/wallet/:name/hidden', requireAuth, ah(async (req, res) => {
+  const { hidden } = req.body || {};
+  const name = decodeURIComponent(req.params.name);
+  const row = await db.prepare('SELECT * FROM wallet_types WHERE user_id=? AND name=?').get(req.user.id, name);
+  if (!row) return res.status(404).json({ error: 'Wallet not found' });
+  await db.prepare('UPDATE wallet_types SET hidden=? WHERE user_id=? AND name=?').run(hidden ? 1 : 0, req.user.id, name);
+  res.json({ ok: true, hidden: !!hidden });
 }));
 
 router.post('/wallet', requireAuth, ah(async (req, res) => {
@@ -250,7 +261,7 @@ router.get('/groups/member/:id/stats', requireAuth, ah(async (req, res) => {
   if (!membership) return res.status(404).json({ error: 'Member not found in your group' });
 
   const txs     = await db.prepare('SELECT * FROM transactions WHERE user_id=? ORDER BY date DESC').all(req.params.id);
-  const wallets = await db.prepare('SELECT name,balance,asset FROM wallet_types WHERE user_id=?').all(req.params.id);
+  const wallets = await db.prepare('SELECT name,balance,asset,hidden FROM wallet_types WHERE user_id=?').all(req.params.id);
 
   const today    = todayStr();
   // Calendar week (Monday–Sunday), matching the dashboard's definition of "This
@@ -493,6 +504,77 @@ router.delete('/todos/:id', requireAuth, ah(async (req, res) => {
   const todo = await db.prepare('SELECT * FROM todos WHERE id=? AND user_id=?').get(req.params.id, req.user.id);
   if (!todo) return res.status(404).json({ error: 'Todo not found' });
   await db.prepare('DELETE FROM todos WHERE id=?').run(todo.id);
+  res.json({ ok: true });
+}));
+
+// ════════════════════════════════════════════════════════════════════════════
+// MONTH WIN RATE — tiny "6 wins / 2 losses" entry per calendar month
+// ════════════════════════════════════════════════════════════════════════════
+
+router.get('/month-winrate', requireAuth, ah(async (req, res) => {
+  res.json(await db.prepare('SELECT month,wins,losses FROM month_winrate WHERE user_id=?').all(req.user.id));
+}));
+
+router.put('/month-winrate/:month', requireAuth, ah(async (req, res) => {
+  const { wins, losses } = req.body || {};
+  const w = Math.max(0, parseInt(wins) || 0);
+  const l = Math.max(0, parseInt(losses) || 0);
+  await db.prepare('INSERT INTO month_winrate (user_id,month,wins,losses) VALUES (?,?,?,?) ON CONFLICT(user_id,month) DO UPDATE SET wins=excluded.wins, losses=excluded.losses')
+    .run(req.user.id, req.params.month, w, l);
+  res.json({ ok: true, month: req.params.month, wins: w, losses: l });
+}));
+
+// ════════════════════════════════════════════════════════════════════════════
+// STRATEGIES — the whole strategy (branches + checklists) lives as one JSON
+// blob per row, same pattern as poll content in messages.content. This keeps
+// the arbitrarily-nested branch/checklist structure editable from the frontend
+// without needing a new endpoint for every nested add/remove.
+// ════════════════════════════════════════════════════════════════════════════
+
+router.get('/strategies', requireAuth, ah(async (req, res) => {
+  const rows = await db.prepare('SELECT * FROM strategies WHERE user_id=? ORDER BY position ASC, created_at ASC').all(req.user.id);
+  res.json(rows.map(r => ({ id: r.id, name: r.name, position: r.position, created_at: r.created_at, updated_at: r.updated_at, ...JSON.parse(r.data) })));
+}));
+
+router.post('/strategies', requireAuth, ah(async (req, res) => {
+  const { name } = req.body || {};
+  if (!name || !name.trim()) return res.status(400).json({ error: 'name is required' });
+  const id = uuidv4();
+  const last = await db.prepare('SELECT MAX(position) AS m FROM strategies WHERE user_id=?').get(req.user.id);
+  const position = (last?.m ?? -1) + 1;
+  const data = {
+    icon: '🎯', color: '#00d4ff', description: '',
+    branches: [{ id: uuidv4(), name: 'Default', checklist: [] }],
+  };
+  const ts = now();
+  await db.prepare('INSERT INTO strategies (id,user_id,name,data,position,created_at,updated_at) VALUES (?,?,?,?,?,?,?)')
+    .run(id, req.user.id, name.trim(), JSON.stringify(data), position, ts, ts);
+  res.json({ id, name: name.trim(), position, created_at: ts, updated_at: ts, ...data });
+}));
+
+router.put('/strategies/:id', requireAuth, ah(async (req, res) => {
+  const row = await db.prepare('SELECT * FROM strategies WHERE id=? AND user_id=?').get(req.params.id, req.user.id);
+  if (!row) return res.status(404).json({ error: 'Strategy not found' });
+  const existing = JSON.parse(row.data);
+  const { name, icon, color, description, branches } = req.body || {};
+  const newName = name !== undefined ? String(name).trim() : row.name;
+  if (name !== undefined && !newName) return res.status(400).json({ error: 'name cannot be empty' });
+  const newData = {
+    icon: icon !== undefined ? icon : existing.icon,
+    color: color !== undefined ? color : existing.color,
+    description: description !== undefined ? description : existing.description,
+    branches: branches !== undefined ? branches : existing.branches,
+  };
+  const ts = now();
+  await db.prepare('UPDATE strategies SET name=?, data=?, updated_at=? WHERE id=?')
+    .run(newName, JSON.stringify(newData), ts, row.id);
+  res.json({ id: row.id, name: newName, position: row.position, created_at: row.created_at, updated_at: ts, ...newData });
+}));
+
+router.delete('/strategies/:id', requireAuth, ah(async (req, res) => {
+  const row = await db.prepare('SELECT * FROM strategies WHERE id=? AND user_id=?').get(req.params.id, req.user.id);
+  if (!row) return res.status(404).json({ error: 'Strategy not found' });
+  await db.prepare('DELETE FROM strategies WHERE id=?').run(row.id);
   res.json({ ok: true });
 }));
 
