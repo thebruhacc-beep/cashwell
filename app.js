@@ -1319,13 +1319,25 @@ function showImportModal() {
 function _openImportModal() {
   const overlay = el('div', {className:'overlay', onclick:e=>{ if(e.target===overlay) overlay.remove(); }});
   const modal   = el('div', {className:'modal slide'});
-  modal.innerHTML = `<div class="modal-title nb">IMPORT ENTRIES</div><div class="modal-sub">Upload an Excel or CSV file with columns: Datum, Bedrag, Type</div>`;
+  modal.innerHTML = `<div class="modal-title nb">IMPORT ENTRIES</div><div class="modal-sub">Upload an Excel or CSV file with columns: Datum, Bedrag, Type. Re-uploading your updated file? Rows already imported are detected automatically and skipped.</div>`;
 
   const fileInp = el('input', {type:'file', accept:'.xlsx,.xls,.csv', className:'inp', style:{marginBottom:'12px',padding:'10px'}});
-  const preview = el('div', {id:'import-preview', style:{maxHeight:'200px',overflowY:'auto',marginBottom:'12px'}});
+  const preview = el('div', {id:'import-preview', style:{maxHeight:'240px',overflowY:'auto',marginBottom:'12px'}});
   modal.append(fileInp, preview);
 
-  let parsedRows = [];
+  // Signature used to detect a row that's already in the database, so a
+  // re-upload of the same (now-updated) export doesn't create duplicates.
+  const txSignature = t => `${t.date}|${Number(t.amount).toFixed(2)}|${String(t.category||'').trim().toLowerCase()}`;
+  const existingSigs = new Set(STATE.transactions.map(txSignature));
+
+  let parsedRows  = []; // every row read from the file
+  let newRows     = []; // rows not already present in the database
+  let forceAll    = false;
+
+  const forceRow = el('label', {className:'flex-gap8 f11 mut', style:{marginBottom:'12px',cursor:'pointer'}});
+  const forceCheck = el('input', {type:'checkbox'});
+  forceCheck.onchange = () => { forceAll = forceCheck.checked; updateSubmitLabel(); };
+  forceRow.append(forceCheck, document.createTextNode('Import already-imported rows too (not recommended — creates duplicates)'));
 
   fileInp.onchange = () => {
     const file = fileInp.files[0];
@@ -1362,6 +1374,7 @@ function _openImportModal() {
       }
 
       // Verwerk rijen
+      const totalRawRows = Math.max(0, range.e.r - range.s.r); // data rows, excluding header
       parsedRows = [];
       for (let row = range.s.r + 1; row <= range.e.r; row++) {
         const r = {};
@@ -1401,64 +1414,83 @@ function _openImportModal() {
         });
       }
 
+      // Flag which rows are already in the database (same date + amount + category)
+      parsedRows.forEach(r => { r._dup = existingSigs.has(txSignature(r)); });
+      newRows = parsedRows.filter(r => !r._dup);
+
       preview.innerHTML = '';
       if (!parsedRows.length) {
         preview.innerHTML = '<div class="f12 mut" style="padding:10px">No valid rows found. Check column names: Datum, Bedrag, Type</div>';
+        updateSubmitLabel();
         return;
       }
-      const skipped = rows.length - parsedRows.length;
+      const skipped  = totalRawRows - parsedRows.length;
+      const dupCount = parsedRows.length - newRows.length;
       const info = el('div', {className:'f11 mut', style:{marginBottom:'6px'}});
-      info.textContent = `${parsedRows.length} rijen gevonden${skipped ? ` (${skipped} overgeslagen — ongeldige datum of bedrag 0)` : ''}`;
+      info.innerHTML = `<b style="color:${dupCount?'var(--txt)':'var(--g)'}">${newRows.length} new</b>${dupCount ? ` · ${dupCount} already imported (will be skipped)` : ''}${skipped ? ` · ${skipped} skipped (invalid date or amount 0)` : ''}`;
       preview.append(info);
       const table = el('table', {style:{width:'100%',borderCollapse:'collapse',fontSize:'11px'}});
-      table.innerHTML = '<tr style="color:#64748b"><th style="text-align:left;padding:4px">Datum (geparsed)</th><th style="text-align:left;padding:4px">Bedrag</th><th style="text-align:left;padding:4px">Type</th></tr>';
-      parsedRows.slice(0,20).forEach(r => {
-        const tr = el('tr', {style:{borderBottom:'1px solid var(--bdr)'}});
-        tr.innerHTML = `<td style="padding:4px">${r.date}</td><td style="padding:4px;color:${r.amount>=0?'#00ff88':'#ff3366'}">${r.amount>=0?'+':''}${r.amount}</td><td style="padding:4px">${r.category}</td>`;
+      table.innerHTML = '<tr style="color:#64748b"><th style="text-align:left;padding:4px">Datum</th><th style="text-align:left;padding:4px">Bedrag</th><th style="text-align:left;padding:4px">Type</th><th style="text-align:left;padding:4px">Status</th></tr>';
+      parsedRows.slice(0,30).forEach(r => {
+        const tr = el('tr', {style:{borderBottom:'1px solid var(--bdr)', opacity:r._dup?0.45:1}});
+        const status = r._dup ? '<span style="color:var(--mut)">⏭ already imported</span>' : '<span style="color:var(--g)">✓ new</span>';
+        tr.innerHTML = `<td style="padding:4px">${r.date}</td><td style="padding:4px;color:${r.amount>=0?'#00ff88':'#ff3366'}">${r.amount>=0?'+':''}${r.amount}</td><td style="padding:4px">${r.category}</td><td style="padding:4px">${status}</td>`;
         table.append(tr);
       });
-      if (parsedRows.length > 20) table.append(el('tr', {}, el('td', {colspan:'3', style:{padding:'4px',color:'#64748b'}}, `...en nog ${parsedRows.length-20} meer rijen`)));
+      if (parsedRows.length > 30) table.append(el('tr', {}, el('td', {colspan:'4', style:{padding:'4px',color:'#64748b'}}, `...en nog ${parsedRows.length-30} meer rijen`)));
       preview.append(table);
+      preview.append(forceRow);
+      updateSubmitLabel();
     };
     reader.readAsBinaryString(file);
   };
 
   const btnRow = el('div', {className:'form-row'});
   const cancel = el('button', {className:'btn btn-o', style:{flex:'1'}, onclick:()=>overlay.remove()}, 'CANCEL');
-  const submit = el('button', {className:'btn btn-g', style:{flex:'2'}}, 'IMPORT ALL');
+  const submit = el('button', {className:'btn btn-g', style:{flex:'2'}}, 'IMPORT');
+
+  function updateSubmitLabel() {
+    const count = forceAll ? parsedRows.length : newRows.length;
+    submit.textContent = count ? `IMPORT ${count} ENTR${count===1?'Y':'IES'}` : 'IMPORT';
+    submit.disabled = !count;
+  }
+  updateSubmitLabel();
 
   submit.onclick = async () => {
-    if (!parsedRows.length) return toast('Error', 'No rows to import');
+    const rowsToImport = forceAll ? parsedRows : newRows;
+    if (!rowsToImport.length) return toast('Nothing to import', 'Every row in this file is already in your data.');
     submit.disabled = true;
-    submit.textContent = `Importing 0/${parsedRows.length}...`;
+    submit.textContent = `Importing 0/${rowsToImport.length}...`;
     let done = 0, errors = 0;
 
     // Add unknown categories first
     const knownCats = new Set(STATE.categories);
-    const newCats   = [...new Set(parsedRows.map(r=>r.category))].filter(c=>!knownCats.has(c));
+    const newCats   = [...new Set(rowsToImport.map(r=>r.category))].filter(c=>!knownCats.has(c));
     for (const c of newCats) {
       try { await api('POST', '/categories', {name:c}); STATE.categories.push(c); } catch {}
     }
 
     // Add unknown wallets
     const knownWals = new Set(STATE.wallet.map(w=>w.name));
-    const newWals   = [...new Set(parsedRows.map(r=>r.wallet))].filter(w=>!knownWals.has(w));
+    const newWals   = [...new Set(rowsToImport.map(r=>r.wallet))].filter(w=>!knownWals.has(w));
     for (const w of newWals) {
       try { await api('POST', '/wallet', {name:w}); STATE.wallet.push({name:w,balance:0}); } catch {}
     }
 
     const batchSize = 10;
-    for (let i = 0; i < parsedRows.length; i++) {
+    for (let i = 0; i < rowsToImport.length; i++) {
       try {
-        const tx = await api('POST', '/transactions', parsedRows[i]);
+        const { _dup, ...payload } = rowsToImport[i];
+        const tx = await api('POST', '/transactions', payload);
         STATE.transactions.unshift(tx);
         done++;
-        if (done % batchSize === 0) submit.textContent = `Importing ${done}/${parsedRows.length}...`;
+        if (done % batchSize === 0) submit.textContent = `Importing ${done}/${rowsToImport.length}...`;
       } catch { errors++; }
     }
 
+    const skippedDupes = parsedRows.length - rowsToImport.length;
     overlay.remove();
-    toast('Import Done', `${done} entries imported${errors?`, ${errors} failed`:''}`);
+    toast('Import Done', `${done} entries imported${skippedDupes?`, ${skippedDupes} duplicates skipped`:''}${errors?`, ${errors} failed`:''}`);
     await loadAll();
     STATE.page = 'dashboard';
     currentPeriod = 'total';
@@ -2699,7 +2731,8 @@ function renderInsights(container) {
 let activeTool = null; // null = hub grid, otherwise the tool's id
 
 function renderToolsPage(container) {
-  if (activeTool === 'risk') { renderRiskTool(container); return; }
+  if (activeTool === 'risk')     { renderRiskTool(container); return; }
+  if (activeTool === 'propfirm') { renderPropFirmTool(container); return; }
 
   const wrap = el('div', {className:'flex-col', style:{gap:'20px'}});
   wrap.append(html('<div class="mut f12" style="max-width:640px">Handy standalone calculators and utilities — nothing here touches your transactions or balance unless you tell it to.</div>'));
@@ -2713,6 +2746,14 @@ function renderToolsPage(container) {
     <div class="tool-desc">Position size from your balance, risk % and stop loss — with live prices for gold, indices, forex and crypto.</div>
   `;
   grid.append(riskCard);
+
+  const propCard = el('div', {className:'tool-card', onclick:()=>{ activeTool='propfirm'; renderPage(); }});
+  propCard.innerHTML = `
+    <div class="tool-icon">🛡</div>
+    <div class="tool-name">Prop Firm Drawdown Tracker</div>
+    <div class="tool-desc">See exactly how much more you can lose — in $ or pips — before you blow your daily or max total drawdown limit.</div>
+  `;
+  grid.append(propCard);
 
   grid.append(html(`
     <div class="tool-card soon">
@@ -2992,6 +3033,181 @@ function updateRiskResults(panel) {
   }
 
   panel.append(box);
+}
+
+// ─── PROP FIRM DRAWDOWN TRACKER ─────────────────────────────────────────────────
+let propState = {
+  accountSize:     100000,
+  currentEquity:   '',
+  dayStartBalance: '',
+  peakBalance:     '',
+  dailyDDPercent:  5,
+  totalDDPercent:  10,
+  dailyDDBasis:    'static',    // 'static' (% of initial account size) | 'daystart' (% of today's starting balance)
+  totalDDBasis:    'static',    // 'static' (% of initial account size) | 'trailing' (% of highest balance ever reached)
+  pipValue:        '',
+};
+
+function propApplyPreset(preset) {
+  if (preset === 'static') { propState.dailyDDPercent=5; propState.totalDDPercent=10; propState.dailyDDBasis='static'; propState.totalDDBasis='static'; }
+  else if (preset === 'trailing') { propState.dailyDDPercent=5; propState.totalDDPercent=10; propState.dailyDDBasis='static'; propState.totalDDBasis='trailing'; }
+  else if (preset === 'daystart') { propState.dailyDDPercent=4; propState.totalDDPercent=8; propState.dailyDDBasis='daystart'; propState.totalDDBasis='static'; }
+  renderPage();
+}
+
+function propCalc() {
+  const accountSize   = parseFloat(propState.accountSize) || 0;
+  const currentEquity = parseFloat(propState.currentEquity);
+  const dailyPct       = parseFloat(propState.dailyDDPercent) || 0;
+  const totalPct       = parseFloat(propState.totalDDPercent) || 0;
+  const pipValue        = parseFloat(propState.pipValue);
+
+  if (!accountSize || !isFinite(currentEquity) || !dailyPct || !totalPct) return null;
+
+  const dayStart = parseFloat(propState.dayStartBalance) || accountSize;
+  // Trailing peak can never be below the account size or your current equity —
+  // auto-correct in case the user forgot to bump it up after a new equity high.
+  const peak = Math.max(parseFloat(propState.peakBalance) || 0, accountSize, currentEquity);
+
+  const dailyBasisAmt = propState.dailyDDBasis === 'static' ? accountSize : dayStart;
+  const dailyLimitAmt = dailyBasisAmt * (dailyPct / 100);
+  const dailyFloor    = dayStart - dailyLimitAmt;
+
+  const totalBasisAmt = propState.totalDDBasis === 'static' ? accountSize : peak;
+  const totalLimitAmt = totalBasisAmt * (totalPct / 100);
+  const totalFloor    = totalBasisAmt - totalLimitAmt;
+
+  const dailyRemaining = Math.max(0, currentEquity - dailyFloor);
+  const totalRemaining = Math.max(0, currentEquity - totalFloor);
+  const dailyBreached  = currentEquity <= dailyFloor;
+  const totalBreached  = currentEquity <= totalFloor;
+
+  const dailyUsedPct = dailyLimitAmt > 0 ? Math.min(100, Math.max(0, ((dayStart - currentEquity) / dailyLimitAmt) * 100)) : 0;
+  const totalUsedPct = totalLimitAmt > 0 ? Math.min(100, Math.max(0, ((totalBasisAmt - currentEquity) / totalLimitAmt) * 100)) : 0;
+
+  const binding = dailyRemaining <= totalRemaining ? 'daily' : 'total';
+  const bindingRemaining = Math.min(dailyRemaining, totalRemaining);
+
+  return {
+    dailyLimitAmt, dailyFloor, dailyRemaining, dailyBreached, dailyUsedPct,
+    totalLimitAmt, totalFloor, totalRemaining, totalBreached, totalUsedPct,
+    binding, bindingRemaining,
+    remainingPips: (pipValue && pipValue > 0) ? bindingRemaining / pipValue : null,
+  };
+}
+
+function renderPropFirmTool(container) {
+  const wrap = el('div', {className:'flex-col', style:{gap:'20px'}});
+  wrap.append(el('button', {className:'btn btn-gh btn-sm', onclick:()=>{ activeTool=null; renderPage(); }}, '← BACK TO TOOLS'));
+
+  const card = el('div', {className:'card'});
+  card.append(html('<div class="section-title mb16">🛡 PROP FIRM DRAWDOWN TRACKER</div>'));
+
+  // Quick presets
+  const presetRow = el('div', {className:'flex-gap8 mb16', style:{flexWrap:'wrap'}});
+  presetRow.append(el('button', {className:'btn btn-gh btn-sm', onclick:()=>propApplyPreset('static')}, 'FTMO-style (5%/10% static)'));
+  presetRow.append(el('button', {className:'btn btn-gh btn-sm', onclick:()=>propApplyPreset('trailing')}, 'Trailing total (5%/10%)'));
+  presetRow.append(el('button', {className:'btn btn-gh btn-sm', onclick:()=>propApplyPreset('daystart')}, 'Day-start basis (4%/8%)'));
+  card.append(presetRow);
+
+  const resultsPanel = el('div', {style:{marginTop:'4px'}});
+
+  function field(labelText, key, placeholder, opts={}) {
+    const col = el('div', {className:'flex-col', style:{gap:'6px'}});
+    col.append(html(`<div class="label">${labelText}</div>`));
+    const inp = el('input', {className:'inp', type:'number', step:'any', placeholder, value: propState[key]});
+    inp.oninput = () => { propState[key] = inp.value; updatePropResults(resultsPanel); };
+    col.append(inp);
+    if (opts.hint) col.append(html(`<div class="f10 mut">${opts.hint}</div>`));
+    return col;
+  }
+
+  const inputsGrid = el('div', {className:'g2', style:{gap:'14px'}});
+  inputsGrid.append(field('ACCOUNT SIZE ($)', 'accountSize', '100000'));
+  inputsGrid.append(field('CURRENT EQUITY ($)', 'currentEquity', '98500'));
+  inputsGrid.append(field('BALANCE AT START OF TODAY ($)', 'dayStartBalance', '100000', {hint:'Defaults to account size if left blank.'}));
+  inputsGrid.append(field('HIGHEST BALANCE EVER REACHED ($)', 'peakBalance', '100000', {hint:'Only matters for trailing total drawdown. Defaults to account size.'}));
+  card.append(inputsGrid);
+
+  // Daily DD basis toggle
+  const dailyBasisWrap = el('div', {className:'flex-col mb16', style:{gap:'6px'}});
+  dailyBasisWrap.append(html('<div class="label">DAILY LOSS LIMIT IS % OF...</div>'));
+  const dailyTabs = el('div', {className:'ptabs'});
+  [['static','Initial account size'],['daystart','Start-of-day balance']].forEach(([m,label]) => {
+    dailyTabs.append(el('button', {className:`ptab ${propState.dailyDDBasis===m?'active':''}`, onclick:()=>{ propState.dailyDDBasis=m; renderPage(); }}, label));
+  });
+  dailyBasisWrap.append(dailyTabs);
+  card.append(dailyBasisWrap);
+
+  // Total DD basis toggle
+  const totalBasisWrap = el('div', {className:'flex-col mb16', style:{gap:'6px'}});
+  totalBasisWrap.append(html('<div class="label">MAX TOTAL DRAWDOWN IS % OF...</div>'));
+  const totalTabs = el('div', {className:'ptabs'});
+  [['static','Initial account size'],['trailing','Highest balance reached (trailing)']].forEach(([m,label]) => {
+    totalTabs.append(el('button', {className:`ptab ${propState.totalDDBasis===m?'active':''}`, onclick:()=>{ propState.totalDDBasis=m; renderPage(); }}, label));
+  });
+  totalBasisWrap.append(totalTabs);
+  card.append(totalBasisWrap);
+
+  const pctGrid = el('div', {className:'g2', style:{gap:'14px'}});
+  pctGrid.append(field('MAX DAILY DRAWDOWN (%)', 'dailyDDPercent', '5'));
+  pctGrid.append(field('MAX TOTAL DRAWDOWN (%)', 'totalDDPercent', '10'));
+  card.append(pctGrid);
+
+  const pipRow = el('div', {className:'mb16'});
+  pipRow.append(field('PIP VALUE ($ per pip, optional)', 'pipValue', '10', {hint:'Depends on your instrument and lot size — enter it to also see your remaining room in pips.'}));
+  card.append(pipRow);
+
+  card.append(resultsPanel);
+  updatePropResults(resultsPanel);
+
+  wrap.append(card);
+  container.append(wrap);
+}
+
+function updatePropResults(panel) {
+  panel.innerHTML = '';
+  const r = propCalc();
+  if (!r) {
+    panel.append(html('<div class="mut f12" style="padding:16px 0">Fill in account size, current equity, and both drawdown percentages to see how much room you have left.</div>'));
+    return;
+  }
+
+  function ddBlock(label, breached, remaining, usedPct, floor, limitAmt, isBinding) {
+    const color = breached ? '#ff3366' : usedPct > 70 ? '#ffe600' : '#00ff88';
+    const box = el('div', {className:'card', style:{
+      background: breached ? 'rgba(255,51,102,.08)' : 'rgba(255,255,255,.03)',
+      borderColor: breached ? 'rgba(255,51,102,.35)' : (isBinding ? 'rgba(0,212,255,.3)' : 'var(--bdr)'),
+    }});
+    box.innerHTML = `
+      <div class="flex-between mb8">
+        <div class="f11 mut" style="letter-spacing:2px">${label}</div>
+        ${isBinding && !breached ? '<span class="f10" style="color:#00d4ff">⚠ MORE RESTRICTIVE</span>' : ''}
+      </div>
+      ${breached
+        ? `<div style="font-family:Orbitron,sans-serif;font-size:22px;color:#ff3366">❌ LIMIT BREACHED</div>`
+        : `<div style="font-family:Orbitron,sans-serif;font-size:26px;color:${color}">$${remaining.toFixed(2)}</div><div class="f11 mut mt4">still available to lose</div>`
+      }
+      <div class="prog mt12"><div class="prog-f" style="width:${usedPct}%;background:${color}"></div></div>
+      <div class="f10 mut mt8">Floor: $${floor.toFixed(2)} &nbsp;·&nbsp; Limit: $${limitAmt.toFixed(2)} &nbsp;·&nbsp; ${usedPct.toFixed(1)}% used</div>
+    `;
+    return box;
+  }
+
+  const grid = el('div', {className:'g2', style:{gap:'14px'}});
+  grid.append(ddBlock('DAILY DRAWDOWN', r.dailyBreached, r.dailyRemaining, r.dailyUsedPct, r.dailyFloor, r.dailyLimitAmt, r.binding==='daily'));
+  grid.append(ddBlock('TOTAL DRAWDOWN', r.totalBreached, r.totalRemaining, r.totalUsedPct, r.totalFloor, r.totalLimitAmt, r.binding==='total'));
+  panel.append(grid);
+
+  const summary = el('div', {className:'card mt16', style:{background:'rgba(0,212,255,.05)', borderColor:'rgba(0,212,255,.25)'}});
+  const bindingLabel = r.binding === 'daily' ? 'daily drawdown' : 'total drawdown';
+  summary.innerHTML = `
+    <div class="f11 mut" style="letter-spacing:1px;margin-bottom:6px">SAFE TO LOSE RIGHT NOW</div>
+    <div style="font-family:Orbitron,sans-serif;font-size:30px;color:#00d4ff">$${r.bindingRemaining.toFixed(2)}</div>
+    ${r.remainingPips !== null ? `<div class="f12 mut mt4">≈ ${r.remainingPips.toFixed(1)} pips at your entered pip value</div>` : ''}
+    <div class="f11 mut mt8">Your <b>${bindingLabel}</b> limit is the tighter one — that's what will get you first if you keep losing.</div>
+  `;
+  panel.append(summary);
 }
 
 

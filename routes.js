@@ -253,7 +253,18 @@ router.get('/groups/member/:id/stats', requireAuth, ah(async (req, res) => {
   const wallets = await db.prepare('SELECT name,balance,asset FROM wallet_types WHERE user_id=?').all(req.params.id);
 
   const today    = todayStr();
-  const weekAgo  = new Date(Date.now() - 7*24*60*60*1000).toISOString().split('T')[0];
+  // Calendar week (Monday–Sunday), matching the dashboard's definition of "This
+  // Week" — NOT a rolling 7-day window, which used to disagree with it.
+  function weekBounds() {
+    const d = new Date();
+    const day = d.getUTCDay(); // 0=sun,1=mon,...
+    const toMonday = (day === 0) ? 6 : day - 1;
+    const toSunday = (day === 0) ? 0 : 7 - day;
+    const monday = new Date(d); monday.setUTCDate(d.getUTCDate() - toMonday);
+    const sunday = new Date(d); sunday.setUTCDate(d.getUTCDate() + toSunday);
+    return { start: monday.toISOString().split('T')[0], end: sunday.toISOString().split('T')[0] };
+  }
+  const { start: weekStart, end: weekEnd } = weekBounds();
   const monthStr = today.slice(0, 7); // YYYY-MM
   const yearStr  = today.slice(0, 4); // YYYY
 
@@ -282,7 +293,7 @@ router.get('/groups/member/:id/stats', requireAuth, ah(async (req, res) => {
 
   const periods = {
     day:   txs.filter(t => t.date === today),
-    week:  txs.filter(t => t.date >= weekAgo),
+    week:  txs.filter(t => t.date >= weekStart && t.date <= weekEnd),
     month: txs.filter(t => t.date.startsWith(monthStr)),
     year:  txs.filter(t => t.date.startsWith(yearStr)),
     total: txs,
