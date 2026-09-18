@@ -28,7 +28,7 @@ const CRYPTO_COINS = {
   BTC:'bitcoin', ETH:'ethereum', SOL:'solana', BNB:'binancecoin',
   XRP:'ripple', ADA:'cardano', DOGE:'dogecoin', MATIC:'matic-network',
   DOT:'polkadot', LTC:'litecoin', LINK:'chainlink', AVAX:'avalanche-2',
-  USDT:'tether', USDC:'usd-coin',
+  USDT:'tether', USDC:'usd-coin', TRX:'tron',
 };
 
 // symbol -> live USD price, refreshed periodically while logged in.
