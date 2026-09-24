@@ -15,6 +15,8 @@ const STATE = {
   todos:        [],
   monthWinrates: [],
   strategies:   [],
+  journal:      [],
+  tradingAccounts: [],
   charts:       {},   // chart.js instances keyed by canvas id
 };
 
@@ -344,7 +346,7 @@ async function pollForUpdates() {
 
 // ─── DATA LOADING ─────────────────────────────────────────────────────────────
 async function loadAll() {
-  const [txns, wal, cats, grp, deps, msgs, todos, winrates, strategies] = await Promise.all([
+  const [txns, wal, cats, grp, deps, msgs, todos, winrates, strategies, journal, tradingAccounts] = await Promise.all([
     api('GET', '/transactions'),
     api('GET', '/wallet'),
     api('GET', '/categories'),
@@ -354,16 +356,20 @@ async function loadAll() {
     api('GET', '/todos'),
     api('GET', '/month-winrate'),
     api('GET', '/strategies'),
+    api('GET', '/journal'),
+    api('GET', '/trading-accounts'),
   ]);
-  STATE.transactions  = txns;
-  STATE.wallet        = wal;
-  STATE.categories    = cats;
-  STATE.group         = grp;
-  STATE.deposits      = deps;
-  STATE.messages      = msgs;
-  STATE.todos         = todos;
-  STATE.monthWinrates = winrates;
-  STATE.strategies    = strategies;
+  STATE.transactions     = txns;
+  STATE.wallet           = wal;
+  STATE.categories       = cats;
+  STATE.group            = grp;
+  STATE.deposits         = deps;
+  STATE.messages         = msgs;
+  STATE.todos            = todos;
+  STATE.monthWinrates    = winrates;
+  STATE.strategies       = strategies;
+  STATE.journal          = journal;
+  STATE.tradingAccounts  = tradingAccounts;
 }
 
 // ─── AUTH ─────────────────────────────────────────────────────────────────────
@@ -2806,6 +2812,7 @@ function renderToolsPage(container) {
   if (activeTool === 'risk')     { renderRiskTool(container); return; }
   if (activeTool === 'propfirm') { renderPropFirmTool(container); return; }
   if (activeTool === 'strategy') { renderStrategyTool(container); return; }
+  if (activeTool === 'journal')  { renderJournalTool(container); return; }
 
   const wrap = el('div', {className:'flex-col', style:{gap:'20px'}});
   wrap.append(html('<div class="mut f12" style="max-width:640px">Handy standalone calculators and utilities — nothing here touches your transactions or balance unless you tell it to.</div>'));
@@ -2835,6 +2842,14 @@ function renderToolsPage(container) {
     <div class="tool-desc">Write your strategies as living checklists, with branches that kick in after a loss — and a confidence meter before you pull the trigger.</div>
   `;
   grid.append(stratCard);
+
+  const journalCard = el('div', {className:'tool-card', onclick:()=>{ activeTool='journal'; renderPage(); }});
+  journalCard.innerHTML = `
+    <div class="tool-icon">📓</div>
+    <div class="tool-name">Trading Journal</div>
+    <div class="tool-desc">Log every trade with notes and photos, see your trading-only profit calendar, and keep separate no-money idea notes too.</div>
+  `;
+  grid.append(journalCard);
 
   grid.append(html(`
     <div class="tool-card soon">
@@ -3539,6 +3554,441 @@ function renderStrategyDetail(container, s) {
   wrap.append(card);
   container.append(wrap);
 }
+
+
+// ─── TRADING JOURNAL ─────────────────────────────────────────────────────────────
+let journalCalView     = null;   // {year,month} — separate from the money Calendar tool's own calView
+let journalSort        = 'newest'; // 'newest' | 'oldest' | 'profit' | 'loss'
+let journalDateFilter  = null;   // 'YYYY-MM-DD', set by clicking a calendar day — links the calendar to the grid below
+let journalTypeTab     = 'trade'; // 'trade' | 'idea' — Ideas have no money attached and don't touch the calendar
+let hiddenAccountIds   = new Set(); // account ids (or 'personal') unchecked in the filter — empty = show all, checked by default
+
+function isAccountVisible(accountId) { return !hiddenAccountIds.has(accountId || 'personal'); }
+function toggleAccountVisible(key) {
+  if (hiddenAccountIds.has(key)) hiddenAccountIds.delete(key); else hiddenAccountIds.add(key);
+  renderPage();
+}
+
+function buildAccountFilterRow() {
+  const wrap = el('div', {className:'flex-gap8 mb16', style:{flexWrap:'wrap',alignItems:'center'}});
+  wrap.append(html('<div class="f10 mut" style="letter-spacing:1px">ACCOUNTS</div>'));
+
+  const allAccounts = [{id:null, name:'Personal', color:'#64748b'}, ...STATE.tradingAccounts];
+  allAccounts.forEach(acc => {
+    const key = acc.id || 'personal';
+    const visible = isAccountVisible(acc.id);
+    const chip = el('div', {className:'account-chip'});
+    chip.append(el('button', {className:`account-checkbox ${visible?'checked':''}`, onclick:()=>toggleAccountVisible(key)}, visible?'✓':''));
+    chip.append(el('span', {className:'account-chip-dot', style:{background:acc.color}}));
+    chip.append(el('span', {className:'account-chip-label', onclick:()=>toggleAccountVisible(key)}, acc.name));
+    if (acc.id) {
+      chip.append(el('button', {className:'account-chip-del', title:'Delete account', onclick: async () => {
+        if (!confirm(`Delete account "${acc.name}"? Its trades move to Personal.`)) return;
+        try {
+          await api('DELETE', `/trading-accounts/${acc.id}`);
+          STATE.tradingAccounts = STATE.tradingAccounts.filter(a=>a.id!==acc.id);
+          hiddenAccountIds.delete(acc.id);
+          renderPage();
+        } catch(e) { toast('Error', e.message); }
+      }}, '✕'));
+    }
+    wrap.append(chip);
+  });
+
+  wrap.append(el('button', {className:'btn btn-gh btn-sm', onclick: async () => {
+    const name = (prompt('Funded account name (e.g. "FTMO 100k"):') || '').trim();
+    if (!name) return;
+    const color = STRAT_COLORS[STATE.tradingAccounts.length % STRAT_COLORS.length];
+    try {
+      const acc = await api('POST', '/trading-accounts', {name, color});
+      STATE.tradingAccounts.push(acc);
+      renderPage();
+    } catch(e) { toast('Error', e.message); }
+  }}, '+ Add Account'));
+
+  return wrap;
+}
+
+function journalCalPrevMonth() {
+  if (!journalCalView) journalCalView = { year: new Date().getFullYear(), month: new Date().getMonth() };
+  journalCalView.month--;
+  if (journalCalView.month < 0) { journalCalView.month = 11; journalCalView.year--; }
+  renderPage();
+}
+function journalCalNextMonth() {
+  if (!journalCalView) journalCalView = { year: new Date().getFullYear(), month: new Date().getMonth() };
+  const real = new Date();
+  if (journalCalView.year === real.getFullYear() && journalCalView.month === real.getMonth()) return;
+  journalCalView.month++;
+  if (journalCalView.month > 11) { journalCalView.month = 0; journalCalView.year++; }
+  renderPage();
+}
+
+function buildTradingCalendarCard() {
+  if (!journalCalView) journalCalView = { year: new Date().getFullYear(), month: new Date().getMonth() };
+  const { year, month } = journalCalView;
+  const real = new Date();
+  const isCurrentMonth = year === real.getFullYear() && month === real.getMonth();
+  const monthLabel = new Date(year, month, 1).toLocaleDateString('en-US', {month:'long', year:'numeric'});
+  const daysInMonth = new Date(year, month+1, 0).getDate();
+  const firstWeekday = (new Date(year, month, 1).getDay() + 6) % 7;
+  const realTodayStr = todayStr();
+
+  // Sum trade profit/loss into its day — this is deliberately separate from
+  // the money Calendar tool's wallet-transaction totals: a $30 day in the
+  // wallet might only be $22 of actual trading P/L, the rest from elsewhere.
+  // Ideas carry no money and never appear here. Only trades from currently
+  // checked accounts count — unchecking an account hides it from every total.
+  const dayTotals = {};
+  STATE.journal.filter(j => (j.type||'trade')==='trade' && isAccountVisible(j.account_id)).forEach(j => { dayTotals[j.date] = (dayTotals[j.date]||0) + j.amount; });
+
+  const monthKeys  = Object.keys(dayTotals).filter(k => k.slice(0,7) === `${year}-${String(month+1).padStart(2,'0')}`);
+  const monthTotal = monthKeys.reduce((s,k) => s + dayTotals[k], 0);
+
+  const weekStart = getWeekStart(), weekEnd = getWeekEnd();
+  const weekTotal = Object.entries(dayTotals).filter(([k]) => k >= weekStart && k <= weekEnd).reduce((s,[,v]) => s+v, 0);
+
+  // Same rolling trailing-year average + color thresholds as the money Calendar.
+  const realToday = new Date(); realToday.setHours(0,0,0,0);
+  const yearAgo = new Date(realToday); yearAgo.setDate(yearAgo.getDate()-365);
+  const yearAgoStr = localDateStr(yearAgo);
+  const trailingProfitVals = Object.entries(dayTotals)
+    .filter(([k,v]) => v > 0 && k >= yearAgoStr && k <= realTodayStr)
+    .map(([,v]) => v);
+  const avg = trailingProfitVals.length ? trailingProfitVals.reduce((a,b)=>a+b,0) / trailingProfitVals.length : 0;
+
+  const allVals = Object.values(dayTotals);
+  const allTimeBest = allVals.length ? Math.max(...allVals) : null;
+
+  const card = el('div', {className:'card'});
+  const header = el('div', {className:'flex-between mb8', style:{flexWrap:'wrap',gap:'8px'}});
+  const navBox = el('div', {className:'flex-gap8'});
+  navBox.append(el('button', {className:'cal-nav-btn', onclick:journalCalPrevMonth, title:'Previous month'}, '‹'));
+  navBox.append(html(`<div class="section-title" style="margin:0;min-width:150px;text-align:center">${monthLabel.toUpperCase()}</div>`));
+  const nextBtn = el('button', {className:`cal-nav-btn ${isCurrentMonth?'disabled':''}`, title: isCurrentMonth?'Already at this month':'Next month'}, '›');
+  if (!isCurrentMonth) nextBtn.onclick = journalCalNextMonth;
+  navBox.append(nextBtn);
+  header.append(navBox);
+
+  const totalsBox = el('div', {style:{textAlign:'right'}});
+  totalsBox.innerHTML = `
+    <div style="font-family:Orbitron,sans-serif;font-size:20px" class="${monthTotal>=0?'ng':'nr'}">${fmtDec(monthTotal)}<span class="f10 mut" style="margin-left:6px;letter-spacing:1px">MONTH</span></div>
+    <div class="f11 mut mt4">This week: <span style="color:${weekTotal>=0?'#00ff88':'#ff3366'}">${fmtDec(weekTotal)}</span></div>
+  `;
+  header.append(totalsBox);
+  card.append(header);
+
+  const wdRow = el('div', {className:'cal-grid mb8'});
+  ['MON','TUE','WED','THU','FRI','SAT','SUN'].forEach(d => wdRow.append(html(`<div class="cal-weekday">${d}</div>`)));
+  card.append(wdRow);
+
+  const grid = el('div', {className:'cal-grid'});
+  for (let i=0;i<firstWeekday;i++) grid.append(el('div', {className:'cal-day empty'}));
+
+  for (let day=1; day<=daysInMonth; day++) {
+    const key = `${year}-${String(month+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+    const val = dayTotals[key] || 0;
+    const isRecord = allTimeBest !== null && val === allTimeBest && val > 0;
+    const isFuture = key > realTodayStr;
+
+    let cls = 'cal-day';
+    if (isFuture) cls += ' future';
+    else if (val === 0) cls += ' empty';
+    else if (val < 0) cls += ' loss';
+    else {
+      const ratio = avg > 0 ? val / avg : 1;
+      if (ratio > 1.5) cls += ' impressive';
+      else if (ratio < 0.85) cls += ' below';
+      else cls += ' onavg';
+    }
+    if (journalDateFilter === key) cls += ' cal-day-selected';
+
+    const cell = el('div', {className:cls});
+    if (isRecord) cell.append(el('div', {className:'cal-crown', title:'All-time best trading day'}, '👑'));
+    cell.append(el('div', {className:'cal-day-num'}, String(day)));
+    if (val !== 0 && !isFuture) cell.append(el('div', {className:'cal-day-amt'}, fmtDec(val)));
+
+    if (!isFuture && val !== 0) {
+      cell.title = 'Click to see this day\'s trades below';
+      cell.onclick = () => { journalDateFilter = (journalDateFilter===key) ? null : key; renderPage(); };
+    }
+    grid.append(cell);
+  }
+  card.append(grid);
+  card.append(html(`
+    <div class="flex-gap8 mt16 f11 mut" style="flex-wrap:wrap">
+      <span>● <span style="color:#ffe600">Below average</span></span>
+      <span>● <span style="color:#00ff88">Average</span></span>
+      <span>● <span style="color:#00d4ff">Impressive (50%+ above)</span></span>
+      <span>● <span style="color:#ff3366">Loss</span></span>
+      <span>👑 Best trading day ever</span>
+      <span>· Click a day to filter your journal below</span>
+    </div>
+  `));
+  return card;
+}
+
+function getFilteredSortedJournal() {
+  let list = STATE.journal.filter(j => (j.type||'trade') === journalTypeTab);
+  if (journalTypeTab === 'trade') {
+    list = list.filter(j => isAccountVisible(j.account_id));
+    if (journalDateFilter) list = list.filter(j => j.date === journalDateFilter);
+  }
+  if (journalSort === 'newest')      list = [...list].sort((a,b) => b.date.localeCompare(a.date) || b.created_at.localeCompare(a.created_at));
+  else if (journalSort === 'oldest') list = [...list].sort((a,b) => a.date.localeCompare(b.date) || a.created_at.localeCompare(b.created_at));
+  else if (journalSort === 'profit') list = [...list].sort((a,b) => b.amount - a.amount);
+  else if (journalSort === 'loss')   list = [...list].sort((a,b) => a.amount - b.amount);
+  return list;
+}
+
+function buildJournalGrid() {
+  const wrap = el('div', {className:'flex-col', style:{gap:'14px'}});
+
+  const controls = el('div', {className:'flex-between', style:{flexWrap:'wrap',gap:'10px'}});
+  const sortTabs = el('div', {className:'ptabs'});
+  const sortOptions = journalTypeTab === 'trade'
+    ? [['newest','Newest'],['oldest','Oldest'],['profit','Best Profit'],['loss','Worst Loss']]
+    : [['newest','Newest'],['oldest','Oldest']];
+  if (journalTypeTab === 'idea' && (journalSort==='profit'||journalSort==='loss')) journalSort = 'newest';
+  sortOptions.forEach(([m,label]) => {
+    sortTabs.append(el('button', {className:`ptab ${journalSort===m?'active':''}`, onclick:()=>{ journalSort=m; renderPage(); }}, label));
+  });
+  controls.append(sortTabs);
+  if (journalTypeTab === 'trade' && journalDateFilter) {
+    controls.append(el('button', {className:'btn btn-gh btn-sm', onclick:()=>{ journalDateFilter=null; renderPage(); }}, `📅 ${journalDateFilter} ✕`));
+  }
+  wrap.append(controls);
+
+  const list = getFilteredSortedJournal();
+  if (!list.length) {
+    const emptyMsg = journalTypeTab === 'idea'
+      ? 'No ideas saved yet — jot down a setup you\'re watching, no trade required.'
+      : (journalDateFilter ? 'No trades logged on this day.' : 'No trades logged yet — hit "+ ADD" to start your journal.');
+    wrap.append(html(`<div class="card text-center" style="padding:40px 20px"><div class="f13 mut">${emptyMsg}</div></div>`));
+    return wrap;
+  }
+
+  const grid = el('div', {className:'journal-grid'});
+  list.forEach(j => {
+    const isIdea = (j.type||'trade') === 'idea';
+    const win = j.amount >= 0;
+    const acc = j.account_id ? STATE.tradingAccounts.find(a=>a.id===j.account_id) : null;
+    const card = el('div', {className:`journal-card ${isIdea?'idea':(win?'win':'lose')}`, onclick:()=>openJournalDetail(j)});
+    const notesPreview = j.notes ? (j.notes.length>60 ? j.notes.slice(0,60)+'…' : j.notes) : '';
+    card.innerHTML = `
+      <div class="flex-between mb8">
+        <div class="journal-card-title">${j.title}</div>
+        <div class="f10 mut" style="flex-shrink:0;margin-left:8px">${j.date}</div>
+      </div>
+      ${isIdea
+        ? `<div class="journal-idea-badge">💡 IDEA</div>`
+        : `<div class="journal-card-amount ${win?'ng':'nr'}">${fmtDec(j.amount)}</div>`}
+      ${!isIdea ? `<div class="journal-account-tag" style="color:${acc?acc.color:'#64748b'};border-color:${acc?acc.color:'#64748b'}55">${acc?acc.name:'Personal'}</div>` : ''}
+      <div class="journal-card-notes ${notesPreview?'':'mut'}">${notesPreview || 'No notes'}</div>
+      ${j.images.length ? `<div class="journal-card-photos">📷 ${j.images.length} photo${j.images.length>1?'s':''}</div>` : ''}
+    `;
+    grid.append(card);
+  });
+  wrap.append(grid);
+  return wrap;
+}
+
+function renderJournalTool(container) {
+  const wrap = el('div', {className:'flex-col', style:{gap:'20px'}});
+  wrap.append(el('button', {className:'btn btn-gh btn-sm', onclick:()=>{ activeTool=null; renderPage(); }}, '← BACK TO TOOLS'));
+
+  const header = el('div', {className:'flex-between', style:{flexWrap:'wrap',gap:'10px'}});
+  header.append(html('<div class="section-title" style="margin:0">📓 TRADING JOURNAL</div>'));
+  header.append(el('button', {className:'btn btn-g btn-sm', onclick:()=>openJournalFormModal(null)}, journalTypeTab==='idea' ? '+ ADD IDEA' : '+ ADD TRADE'));
+  wrap.append(header);
+
+  const typeTabs = el('div', {className:'ptabs'});
+  typeTabs.append(el('button', {className:`ptab ${journalTypeTab==='trade'?'active':''}`, onclick:()=>{ journalTypeTab='trade'; renderPage(); }}, '📈 Trades'));
+  typeTabs.append(el('button', {className:`ptab ${journalTypeTab==='idea'?'active':''}`, onclick:()=>{ journalTypeTab='idea'; renderPage(); }}, '💡 Ideas'));
+  wrap.append(typeTabs);
+
+  if (journalTypeTab === 'trade') {
+    wrap.append(buildAccountFilterRow());
+    wrap.append(buildTradingCalendarCard());
+  } else {
+    wrap.append(html('<div class="mut f12">Ideas are just for keeping track of setups, expectancies or things worth watching — no money attached, so they don\'t show up on the calendar above.</div>'));
+  }
+
+  wrap.append(buildJournalGrid());
+
+  container.append(wrap);
+}
+
+function openJournalFormModal(existing) {
+  const overlay = el('div', {className:'overlay', onclick:e=>{ if(e.target===overlay) overlay.remove(); }});
+  const modal = el('div', {className:'modal slide'});
+  let entryType = existing ? (existing.type||'trade') : journalTypeTab;
+  modal.innerHTML = `<div class="modal-title nb">${existing ? 'EDIT ENTRY' : 'NEW ENTRY'}</div>`;
+
+  const typeTabs = el('div', {className:'ptabs mb12'});
+  const tradeTab = el('button', {className:`ptab ${entryType==='trade'?'active':''}`}, '📈 Trade');
+  const ideaTab  = el('button', {className:`ptab ${entryType==='idea'?'active':''}`}, '💡 Idea');
+  typeTabs.append(tradeTab, ideaTab);
+  modal.append(typeTabs);
+
+  const titleInp = el('input', {className:'inp mb12', placeholder:'Title, e.g. "EURUSD Long"', value: existing?.title || ''});
+
+  const row = el('div', {className:'g2 mb12', style:{gap:'12px'}});
+  const amtCol = el('div', {className:'flex-col', style:{gap:'6px'}});
+  amtCol.append(html('<div class="label">PROFIT / LOSS ($)</div>'));
+  const amtInp = el('input', {className:'inp', type:'number', step:'any', placeholder:'e.g. 120 or -45', value: existing?.amount ?? ''});
+  amtCol.append(amtInp);
+  const dateCol = el('div', {className:'flex-col', style:{gap:'6px'}});
+  dateCol.append(html('<div class="label">DATE</div>'));
+  const dateInp = el('input', {className:'inp', type:'date', value: existing?.date || todayStr()});
+  dateCol.append(dateInp);
+  row.append(amtCol, dateCol);
+
+  const accCol = el('div', {className:'flex-col mb12', style:{gap:'6px'}});
+  accCol.append(html('<div class="label">ACCOUNT</div>'));
+  const accSel = el('select', {className:'inp'});
+  function refreshAccOptions() {
+    accSel.innerHTML = '';
+    accSel.append(el('option', {value:''}, 'Personal'));
+    STATE.tradingAccounts.forEach(acc => accSel.append(el('option', {value:acc.id}, acc.name)));
+    accSel.append(el('option', {value:'__new__'}, '+ New account...'));
+    accSel.value = existing?.account_id || '';
+  }
+  refreshAccOptions();
+  accSel.onchange = async () => {
+    if (accSel.value !== '__new__') return;
+    const name = (prompt('New account name (e.g. "FTMO 100k"):') || '').trim();
+    if (!name) { accSel.value = ''; return; }
+    try {
+      const color = STRAT_COLORS[STATE.tradingAccounts.length % STRAT_COLORS.length];
+      const acc = await api('POST', '/trading-accounts', {name, color});
+      STATE.tradingAccounts.push(acc);
+      refreshAccOptions();
+      accSel.value = acc.id;
+    } catch(e) { toast('Error', e.message); accSel.value = ''; }
+  };
+  accCol.append(accSel);
+
+  function applyTypeUI() {
+    tradeTab.classList.toggle('active', entryType==='trade');
+    ideaTab.classList.toggle('active', entryType==='idea');
+    amtCol.style.display = entryType==='trade' ? '' : 'none';
+    accCol.style.display = entryType==='trade' ? '' : 'none';
+    dateCol.style.gridColumn = entryType==='trade' ? '' : '1 / -1';
+  }
+  tradeTab.onclick = () => { entryType='trade'; applyTypeUI(); };
+  ideaTab.onclick  = () => { entryType='idea'; applyTypeUI(); };
+  applyTypeUI();
+
+  const notesArea = el('textarea', {className:'inp mb12', style:{width:'100%',minHeight:'80px',resize:'vertical',fontFamily:'inherit'}, placeholder: entryType==='idea' ? 'What\'s the setup, expectancy or thing worth watching...' : 'What happened, what did you learn...'}, existing?.notes || '');
+
+  let images = existing?.images ? [...existing.images] : [];
+  const photoGrid = el('div', {className:'journal-photo-grid mb12'});
+  const fileInp = el('input', {type:'file', accept:'image/*', multiple:true, style:{display:'none'}});
+  function renderPhotoGrid() {
+    photoGrid.innerHTML = '';
+    images.forEach((src,idx) => {
+      const thumb = el('div', {className:'journal-photo-thumb'});
+      thumb.style.backgroundImage = `url(${src})`;
+      thumb.append(el('button', {className:'journal-photo-remove', onclick:(e)=>{ e.stopPropagation(); images.splice(idx,1); renderPhotoGrid(); }}, '✕'));
+      photoGrid.append(thumb);
+    });
+    photoGrid.append(el('div', {className:'journal-photo-add', onclick:()=>fileInp.click()}, '📷 +'));
+  }
+  fileInp.addEventListener('change', async () => {
+    const files = [...fileInp.files];
+    fileInp.value = '';
+    for (const file of files) {
+      try { images.push(await compressImageFile(file)); } catch(e) {}
+    }
+    renderPhotoGrid();
+  });
+  renderPhotoGrid();
+
+  modal.append(titleInp, row, accCol, html('<div class="label mb8">NOTES</div>'), notesArea, html('<div class="label mb8">PHOTOS</div>'), photoGrid, fileInp);
+
+  const btnRow = el('div', {className:'form-row'});
+  const cancel = el('button', {className:'btn btn-o', style:{flex:'1'}, onclick:()=>overlay.remove()}, 'CANCEL');
+  const save   = el('button', {className:'btn btn-g', style:{flex:'2'}}, existing ? 'SAVE CHANGES' : 'ADD');
+  save.onclick = async () => {
+    const title  = titleInp.value.trim();
+    if (!title) return toast('Missing title', 'Give it a name.');
+    let amount = 0;
+    if (entryType === 'trade') {
+      amount = parseFloat(amtInp.value);
+      if (isNaN(amount)) return toast('Missing amount', 'Enter a profit or loss amount.');
+    }
+    save.disabled = true; save.textContent = '...';
+    try {
+      const account_id = entryType==='trade' && accSel.value && accSel.value!=='__new__' ? accSel.value : null;
+      const payload = { title, amount, date: dateInp.value || todayStr(), notes: notesArea.value, images, type: entryType, account_id };
+      if (existing) {
+        const updated = await api('PUT', `/journal/${existing.id}`, payload);
+        Object.assign(existing, updated);
+      } else {
+        const created = await api('POST', '/journal', payload);
+        STATE.journal.unshift(created);
+      }
+      overlay.remove();
+      renderPage();
+    } catch(e) {
+      toast('Error', e.message);
+      save.disabled = false; save.textContent = existing ? 'SAVE CHANGES' : 'ADD';
+    }
+  };
+  btnRow.append(cancel, save);
+  modal.append(btnRow);
+  overlay.append(modal);
+  document.body.append(overlay);
+}
+
+function openJournalDetail(j) {
+  const overlay = el('div', {className:'overlay', onclick:e=>{ if(e.target===overlay) overlay.remove(); }});
+  const modal = el('div', {className:'modal slide', style:{maxWidth:'520px'}});
+  const isIdea = (j.type||'trade') === 'idea';
+  const win = j.amount >= 0;
+  const acc = j.account_id ? STATE.tradingAccounts.find(a=>a.id===j.account_id) : null;
+  modal.innerHTML = `
+    <div class="flex-between mb8" style="align-items:flex-start">
+      <div class="modal-title nb" style="margin:0">${j.title}</div>
+      <div class="f11 mut" style="flex-shrink:0;margin-left:8px">${j.date}</div>
+    </div>
+    ${isIdea
+      ? `<div class="journal-idea-badge" style="margin-bottom:16px;font-size:12px">💡 IDEA — no money attached</div>`
+      : `<div style="font-family:Orbitron,sans-serif;font-size:30px;margin-bottom:8px" class="${win?'ng':'nr'}">${fmtDec(j.amount)}</div>
+         <div class="journal-account-tag" style="margin-bottom:16px;color:${acc?acc.color:'#64748b'};border-color:${acc?acc.color:'#64748b'}55">${acc?acc.name:'Personal'}</div>`}
+  `;
+  modal.append(j.notes
+    ? html(`<div class="f12 mb16" style="white-space:pre-wrap;line-height:1.6">${j.notes}</div>`)
+    : html('<div class="f12 mut mb16">No notes for this trade.</div>'));
+
+  if (j.images && j.images.length) {
+    const gallery = el('div', {className:'journal-gallery mb16'});
+    j.images.forEach(src => {
+      const img = el('img', {src, className:'journal-gallery-img'});
+      img.onclick = () => showImageLightbox(src);
+      gallery.append(img);
+    });
+    modal.append(gallery);
+  }
+
+  const btnRow = el('div', {className:'form-row'});
+  btnRow.append(el('button', {className:'btn btn-o', style:{flex:'1'}, onclick:()=>overlay.remove()}, 'CLOSE'));
+  btnRow.append(el('button', {className:'btn btn-gh', style:{flex:'1'}, onclick:()=>{ overlay.remove(); openJournalFormModal(j); }}, '✎ EDIT'));
+  btnRow.append(el('button', {className:'btn btn-r', style:{flex:'1'}, onclick: async () => {
+    if (!confirm(`Delete "${j.title}"?`)) return;
+    try {
+      await api('DELETE', `/journal/${j.id}`);
+      STATE.journal = STATE.journal.filter(x=>x.id!==j.id);
+      overlay.remove();
+      renderPage();
+    } catch(e) { toast('Error', e.message); }
+  }}, '✕ DELETE'));
+  modal.append(btnRow);
+  overlay.append(modal);
+  document.body.append(overlay);
+}
+
 
 function renderSettings(container) {
   const col = el('div', {className:'flex-col', style:{gap:'20px'}});

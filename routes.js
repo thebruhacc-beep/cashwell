@@ -579,6 +579,104 @@ router.delete('/strategies/:id', requireAuth, ah(async (req, res) => {
 }));
 
 // ════════════════════════════════════════════════════════════════════════════
+// TRADING JOURNAL — entries with title, profit/loss, date, notes and photos.
+// Feeds its own trading-specific calendar heatmap (separate from the money
+// Calendar tool, which tracks wallet transactions rather than individual trades).
+// ════════════════════════════════════════════════════════════════════════════
+
+router.get('/journal', requireAuth, ah(async (req, res) => {
+  const rows = await db.prepare('SELECT * FROM journal_entries WHERE user_id=? ORDER BY date DESC, created_at DESC').all(req.user.id);
+  res.json(rows.map(r => ({ ...r, images: JSON.parse(r.images || '[]') })));
+}));
+
+router.post('/journal', requireAuth, ah(async (req, res) => {
+  const { title, amount, date, notes, images, type, account_id } = req.body || {};
+  const entryType = type === 'idea' ? 'idea' : 'trade';
+  if (!title || !String(title).trim()) return res.status(400).json({ error: 'title is required' });
+  // Ideas carry no money — only trades require a profit/loss amount.
+  if (entryType === 'trade' && (amount === undefined || isNaN(parseFloat(amount)))) {
+    return res.status(400).json({ error: 'amount is required for a trade' });
+  }
+  const id          = uuidv4();
+  const ts          = now();
+  const entryDate   = date || todayStr();
+  const imgArr      = Array.isArray(images) ? images : [];
+  const finalAmount = entryType === 'trade' ? parseFloat(amount) : 0;
+  const finalAcc    = entryType === 'trade' && account_id ? account_id : null;
+  await db.prepare('INSERT INTO journal_entries (id,user_id,title,amount,date,notes,images,type,account_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
+    .run(id, req.user.id, String(title).trim(), finalAmount, entryDate, notes || '', JSON.stringify(imgArr), entryType, finalAcc, ts);
+  res.json({ id, title: String(title).trim(), amount: finalAmount, date: entryDate, notes: notes || '', images: imgArr, type: entryType, account_id: finalAcc, created_at: ts });
+}));
+
+router.put('/journal/:id', requireAuth, ah(async (req, res) => {
+  const row = await db.prepare('SELECT * FROM journal_entries WHERE id=? AND user_id=?').get(req.params.id, req.user.id);
+  if (!row) return res.status(404).json({ error: 'Entry not found' });
+  const { title, amount, date, notes, images, type, account_id } = req.body || {};
+  const newTitle  = title !== undefined ? String(title).trim() : row.title;
+  if (title !== undefined && !newTitle) return res.status(400).json({ error: 'title cannot be empty' });
+  const newType   = type !== undefined ? (type === 'idea' ? 'idea' : 'trade') : row.type;
+  if (newType === 'trade' && amount !== undefined && isNaN(parseFloat(amount))) return res.status(400).json({ error: 'invalid amount' });
+  const newAmount = newType === 'idea' ? 0 : (amount !== undefined ? parseFloat(amount) : row.amount);
+  const newAccId  = newType === 'idea' ? null : (account_id !== undefined ? (account_id || null) : row.account_id);
+  const newDate   = date !== undefined ? date : row.date;
+  const newNotes  = notes !== undefined ? notes : row.notes;
+  const newImages = images !== undefined ? (Array.isArray(images) ? images : []) : JSON.parse(row.images || '[]');
+  await db.prepare('UPDATE journal_entries SET title=?, amount=?, date=?, notes=?, images=?, type=?, account_id=? WHERE id=?')
+    .run(newTitle, newAmount, newDate, newNotes, JSON.stringify(newImages), newType, newAccId, row.id);
+  res.json({ id: row.id, title: newTitle, amount: newAmount, date: newDate, notes: newNotes, images: newImages, type: newType, account_id: newAccId, created_at: row.created_at });
+}));
+
+router.delete('/journal/:id', requireAuth, ah(async (req, res) => {
+  const row = await db.prepare('SELECT * FROM journal_entries WHERE id=? AND user_id=?').get(req.params.id, req.user.id);
+  if (!row) return res.status(404).json({ error: 'Entry not found' });
+  await db.prepare('DELETE FROM journal_entries WHERE id=?').run(row.id);
+  res.json({ ok: true });
+}));
+
+// ════════════════════════════════════════════════════════════════════════════
+// TRADING ACCOUNTS — funded/prop-firm accounts a trade's profit can be filed
+// under. A trade with no account (account_id NULL) belongs to the implicit
+// "Personal" bucket the frontend always shows alongside the user's own accounts.
+// ════════════════════════════════════════════════════════════════════════════
+
+router.get('/trading-accounts', requireAuth, ah(async (req, res) => {
+  const rows = await db.prepare('SELECT * FROM trading_accounts WHERE user_id=? ORDER BY position ASC, created_at ASC').all(req.user.id);
+  res.json(rows);
+}));
+
+router.post('/trading-accounts', requireAuth, ah(async (req, res) => {
+  const { name, color } = req.body || {};
+  if (!name || !name.trim()) return res.status(400).json({ error: 'name is required' });
+  const id = uuidv4();
+  const last = await db.prepare('SELECT MAX(position) AS m FROM trading_accounts WHERE user_id=?').get(req.user.id);
+  const position = (last?.m ?? -1) + 1;
+  const ts = now();
+  await db.prepare('INSERT INTO trading_accounts (id,user_id,name,color,position,created_at) VALUES (?,?,?,?,?,?)')
+    .run(id, req.user.id, name.trim(), color || '#00d4ff', position, ts);
+  res.json({ id, name: name.trim(), color: color || '#00d4ff', position, created_at: ts });
+}));
+
+router.put('/trading-accounts/:id', requireAuth, ah(async (req, res) => {
+  const row = await db.prepare('SELECT * FROM trading_accounts WHERE id=? AND user_id=?').get(req.params.id, req.user.id);
+  if (!row) return res.status(404).json({ error: 'Account not found' });
+  const { name, color } = req.body || {};
+  const newName = name !== undefined ? String(name).trim() : row.name;
+  if (name !== undefined && !newName) return res.status(400).json({ error: 'name cannot be empty' });
+  const newColor = color !== undefined ? color : row.color;
+  await db.prepare('UPDATE trading_accounts SET name=?, color=? WHERE id=?').run(newName, newColor, row.id);
+  res.json({ id: row.id, name: newName, color: newColor, position: row.position, created_at: row.created_at });
+}));
+
+router.delete('/trading-accounts/:id', requireAuth, ah(async (req, res) => {
+  const row = await db.prepare('SELECT * FROM trading_accounts WHERE id=? AND user_id=?').get(req.params.id, req.user.id);
+  if (!row) return res.status(404).json({ error: 'Account not found' });
+  // Trades filed under this account fall back to "Personal" rather than being deleted.
+  await db.prepare('UPDATE journal_entries SET account_id=NULL WHERE account_id=? AND user_id=?').run(row.id, req.user.id);
+  await db.prepare('DELETE FROM trading_accounts WHERE id=?').run(row.id);
+  res.json({ ok: true });
+}));
+
+// ════════════════════════════════════════════════════════════════════════════
 // MARKET QUOTES — free, keyless live-price lookup for the Risk Management tool.
 // Crypto prices are fetched client-side straight from CoinGecko (like the rest
 // of the app already does). Gold/indices/forex don't have a keyless client-side

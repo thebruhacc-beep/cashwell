@@ -154,6 +154,26 @@ async function initDb() {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS journal_entries (
+      id         TEXT PRIMARY KEY,
+      user_id    TEXT NOT NULL,
+      title      TEXT NOT NULL,
+      amount     REAL NOT NULL,
+      date       TEXT NOT NULL,
+      notes      TEXT DEFAULT '',
+      images     TEXT DEFAULT '[]',  -- JSON array of compressed base64 data URLs
+      type       TEXT NOT NULL DEFAULT 'trade', -- 'trade' (has P/L, counts on the trading calendar) | 'idea' (no money attached)
+      account_id TEXT DEFAULT NULL, -- which funded/trading account this trade's profit belongs to; NULL = "Personal"
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS trading_accounts (
+      id         TEXT PRIMARY KEY,
+      user_id    TEXT NOT NULL,
+      name       TEXT NOT NULL,
+      color      TEXT DEFAULT '#00d4ff',
+      position   INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
+    );
   `);
 
   // Migration for databases created before the `asset` column existed
@@ -181,6 +201,18 @@ async function initDb() {
   try {
     await client.execute('ALTER TABLE wallet_types ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0');
     console.log('🔧 Migrated: added wallet_types.hidden column');
+  } catch (e) {
+    // Already exists — fine, ignore.
+  }
+  try {
+    await client.execute("ALTER TABLE journal_entries ADD COLUMN type TEXT NOT NULL DEFAULT 'trade'");
+    console.log('🔧 Migrated: added journal_entries.type column');
+  } catch (e) {
+    // Already exists — fine, ignore.
+  }
+  try {
+    await client.execute('ALTER TABLE journal_entries ADD COLUMN account_id TEXT DEFAULT NULL');
+    console.log('🔧 Migrated: added journal_entries.account_id column');
   } catch (e) {
     // Already exists — fine, ignore.
   }
